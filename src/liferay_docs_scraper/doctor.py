@@ -153,23 +153,23 @@ def print_result(result: DoctorResult) -> None:
     print(f"Anomalies report: {result.anomaly_count} entries")
     if result.coverage_gap_count:
         print(
-            "BFS coverage gaps refreshed directly: "
+            "Crawl coverage gaps refreshed directly: "
             f"{result.direct_refreshed_count}/{result.coverage_gap_count}"
         )
     print(f"Claude Code skill: {skill_status} ({result.skill_path})")
 
     if result.ok:
         if result.docs_stale:
-            print(f"Warning: official docs are older than ~{STALE_AFTER_DAYS} days; refresh with uvx liferay-context-builder.")
+            print(f"Warning: official docs are older than ~{STALE_AFTER_DAYS} days; refresh with uv run liferay-context-builder.")
         print("Ready: ask Claude Code a Liferay DXP question in this project.")
         return
 
     print("\nNext steps:")
     if not result.docs_ready:
-        print("  uvx --from crawl4ai crawl4ai-setup")
-        print("  uvx liferay-context-builder")
+        print("  Set FIRECRAWL_API_URL or start the stack: cd /path/to/firecrawl && docker compose up -d")
+        print("  uv run liferay-context-builder")
     if not result.skill_installed:
-        print("  npx skills add mordonez/liferay-context-builder --skill liferay-expert -a claude-code")
+        print("  npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code")
 
 
 def format_fetch_window(result: DoctorResult) -> str:

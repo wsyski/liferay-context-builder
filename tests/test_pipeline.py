@@ -113,7 +113,7 @@ def test_write_filtered_reports_includes_crawl_errors(monkeypatch, tmp_path):
 def test_main_exits_nonzero_on_crawl_error(monkeypatch, tmp_path):
     configure_pipeline_dirs(monkeypatch, tmp_path)
 
-    async def fake_run_crawl(max_depth, max_pages):
+    def fake_run_crawl(max_depth, max_pages):
         return pipeline.RunStats(crawl_errors=["boom"])
 
     monkeypatch.setattr(pipeline, "run_crawl", fake_run_crawl)
@@ -126,3 +126,109 @@ def test_main_exits_nonzero_on_crawl_error(monkeypatch, tmp_path):
         pipeline.main()
 
     assert exc_info.value.code == 1
+
+
+def test_crawl_request_scopes_to_english_dxp_paths():
+    request = pipeline.build_crawl_request(max_depth=12, max_pages=3000)
+    assert request["includePaths"] == ["^/w/dxp(/|$)"]
+    assert request["maxDiscoveryDepth"] == 12
+    assert request["limit"] == 3000
+    assert request["allowExternalLinks"] is False
+    assert request["sitemap"] == "skip"
+    assert request["crawlEntireDomain"] is True
+    assert request["scrapeOptions"]["includeTags"] == [pipeline.CONTENT_SELECTOR]
+    assert request["scrapeOptions"]["formats"] == ["markdown"]
+    assert "json" not in request["scrapeOptions"]["formats"]
+
+
+def test_run_crawl_records_firecrawl_failure(monkeypatch, tmp_path):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+
+    def boom(seed_url, request):
+        raise RuntimeError("crawl job j1 ended failed: boom")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(pipeline.fetcher, "crawl", boom)
+    stats = pipeline.run_crawl(12, 10)
+    assert stats.crawl_errors == ["crawl job j1 ended failed: boom"]
+
+
+def test_main_reports_unreachable_firecrawl(monkeypatch, tmp_path, capsys):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+
+    def unreachable(seed_url, request):
+        raise pipeline.fetcher.FirecrawlUnavailable("Firecrawl not reachable at http://localhost:3002: refused")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(pipeline.fetcher, "crawl", unreachable)
+    monkeypatch.setattr("sys.argv", ["liferay-context-builder"])
+    with pytest.raises(SystemExit) as exc_info:
+        pipeline.main()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "FIRECRAWL_API_URL" in err and "docker compose up -d" in err
+
+
+def test_discovered_total_counts_distinct_urls_once(monkeypatch, tmp_path):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    stats = pipeline.RunStats()
+    url = "https://learn.liferay.com/w/dxp/search/search-administration-and-tuning/synonym-sets"
+
+    pipeline.process_crawl_result(crawl_result(url), stats)
+    pipeline.process_crawl_result(crawl_result(url), stats)
+
+    assert stats.discovered_total == 1
+
+
+def test_retry_failed_pages_isolates_per_page_processing_error(monkeypatch, tmp_path):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    url_ok = "https://learn.liferay.com/w/dxp/search/ok"
+    url_bad = "https://learn.liferay.com/w/dxp/search/bad"
+    stats = pipeline.RunStats(fetch_failed=[url_ok, url_bad])
+    monkeypatch.setattr(
+        pipeline.fetcher, "batch_scrape", lambda urls, options: iter([crawl_result(url_ok), crawl_result(url_bad)])
+    )
+
+    real_process = pipeline.process_crawl_result
+
+    def fake_process(result, stats):
+        if pipeline.normalize(result.url) == url_bad:
+            raise ValueError("boom")
+        real_process(result, stats)
+
+    monkeypatch.setattr(pipeline, "process_crawl_result", fake_process)
+
+    pipeline.retry_failed_pages(stats)
+
+    assert stats.fetch_failed == [url_bad]
+    assert stats.outcomes["search"][0].url == url_ok
+
+
+def test_retry_failed_pages_batch_error_readds_only_unprocessed(monkeypatch, tmp_path):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    url_a = "https://learn.liferay.com/w/dxp/search/a"
+    url_b = "https://learn.liferay.com/w/dxp/search/b"
+    stats = pipeline.RunStats(fetch_failed=[url_a, url_b])
+
+    def fake_batch_scrape(urls, options):
+        yield crawl_result(url_a)
+        raise RuntimeError("network blew up")
+
+    monkeypatch.setattr(pipeline.fetcher, "batch_scrape", fake_batch_scrape)
+
+    pipeline.retry_failed_pages(stats)
+
+    assert stats.outcomes["search"][0].url == url_a
+    assert stats.fetch_failed == [url_b]
+
+
+def test_retry_failed_pages_recovers_transient_empty_page(monkeypatch, tmp_path):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    url = "https://learn.liferay.com/w/dxp/search/search-administration-and-tuning/synonym-sets"
+    stats = pipeline.RunStats(fetch_failed=[url])
+    monkeypatch.setattr(pipeline.fetcher, "batch_scrape", lambda urls, options: iter([crawl_result(url)]))
+
+    pipeline.retry_failed_pages(stats)
+
+    assert stats.fetch_failed == []
+    assert stats.outcomes["search"][0].status == "new"

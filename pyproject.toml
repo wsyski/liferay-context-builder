@@ -1,12 +1,12 @@
 [project]
 name = "liferay-context-builder"
-version = "0.7.1"
+version = "0.8.0"
 description = "Build a local, cited Liferay DXP context library for the liferay-expert Claude Code skill."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "crawl4ai>=0.9.0,<1.0",
+    "markdownify>=0.13,<1",
     "beautifulsoup4>=4.12,<5",
 ]
 

@@ -14,10 +14,10 @@
   <body>
     <header class="hero">
       <nav class="topbar" aria-label="Primary navigation">
-        <a class="brand" href="https://github.com/mordonez/liferay-context-builder">liferay-context-builder</a>
+        <a class="brand" href="https://github.com/wsyski/liferay-context-builder">liferay-context-builder</a>
         <div class="nav-links">
           <a href="https://pypi.org/project/liferay-context-builder/">PyPI</a>
-          <a href="https://github.com/mordonez/liferay-context-builder">GitHub</a>
+          <a href="https://github.com/wsyski/liferay-context-builder">GitHub</a>
         </div>
       </nav>
       <section class="hero-copy" aria-labelledby="page-title">
@@ -84,10 +84,10 @@
           <p class="eyebrow">Quickstart</p>
           <h2 id="install-title">Build the context library and verify the skill.</h2>
         </div>
-        <pre><code>uvx --from crawl4ai crawl4ai-setup
-uvx liferay-context-builder
-npx skills add mordonez/liferay-context-builder --skill liferay-expert -a claude-code
-uvx --from liferay-context-builder liferay-context-builder-doctor</code></pre>
+        <pre><code>docker compose up -d   # in your Firecrawl checkout
+uv run liferay-context-builder
+npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code
+uv run liferay-context-builder-doctor</code></pre>
       </section>
 
       <section class="section details" aria-labelledby="details-title">
@@ -107,7 +107,7 @@ uvx --from liferay-context-builder liferay-context-builder-doctor</code></pre>
     <footer class="footer">
       <span>MIT licensed.</span>
       <span>Unofficial project, not affiliated with Liferay.</span>
-      <a href="https://github.com/mordonez/liferay-context-builder">View on GitHub</a>
+      <a href="https://github.com/wsyski/liferay-context-builder">View on GitHub</a>
       <a href="https://pypi.org/project/liferay-context-builder/">Install from PyPI</a>
     </footer>
   </body>

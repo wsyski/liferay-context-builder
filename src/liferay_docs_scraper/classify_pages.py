@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Navigation-vs-content heuristic, shared with crawl4ai_pipeline.py.
+"""Navigation-vs-content heuristic, shared with pipeline.py.
 
 An "index"/navigation page is one whose body (frontmatter stripped) is
 short and consists mostly of links to subpages -- no substantial technical

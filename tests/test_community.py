@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -48,12 +47,12 @@ def test_extract_article_links_keeps_absolute_kb_article_urls_only():
 
 
 def test_discover_article_urls_raises_when_listing_fetch_fails():
-    class FakeCrawler:
-        async def arun(self, url, config):
+    class FakeClient:
+        def scrape(self, url, options):
             return SimpleNamespace(success=False)
 
     with pytest.raises(RuntimeError, match="search listing page .* failed"):
-        asyncio.run(community.discover_article_urls(FakeCrawler(), "33317328"))
+        community.discover_article_urls(FakeClient(), "33317328")
 
 
 def test_discover_article_urls_stops_when_no_new_links():
@@ -64,11 +63,11 @@ def test_discover_article_urls_stops_when_no_new_links():
     </body></html>
     """
 
-    class FakeCrawler:
-        async def arun(self, url, config):
+    class FakeClient:
+        def scrape(self, url, options):
             return SimpleNamespace(success=True, html=html)
 
-    assert asyncio.run(community.discover_article_urls(FakeCrawler(), "33317328")) == [
+    assert community.discover_article_urls(FakeClient(), "33317328") == [
         "https://learn.liferay.com/kb-article/how-to-fix-search"
     ]
 
@@ -81,42 +80,70 @@ def test_discover_article_urls_honors_limit_without_paging_further():
     </body></html>
     """
 
-    class FakeCrawler:
+    class FakeClient:
         def __init__(self):
             self.calls = 0
 
-        async def arun(self, url, config):
+        def scrape(self, url, options):
             self.calls += 1
             return SimpleNamespace(success=True, html=html)
 
-    crawler = FakeCrawler()
-
-    assert asyncio.run(community.discover_article_urls(crawler, "33317328", limit=1)) == [
+    client = FakeClient()
+    assert community.discover_article_urls(client, "33317328", limit=1) == [
         "https://learn.liferay.com/kb-article/a"
     ]
-    assert crawler.calls == 1
+    assert client.calls == 1
 
 
 def test_run_resource_type_records_stream_crash(monkeypatch, tmp_path):
     configure_community_dirs(monkeypatch, tmp_path)
 
-    class FakeCrawler:
-        async def arun_many(self, urls, config):
-            raise RuntimeError("browser crashed")
+    class FakeClient:
+        def batch_scrape(self, urls, options):
+            raise RuntimeError("batch job b1 ended failed: boom")
 
-    async def fake_discover(crawler, resource_type_id, limit=None):
-        return ["https://learn.liferay.com/kb-article/a"]
+    monkeypatch.setattr(community, "discover_article_urls",
+                        lambda client, resource_type_id, limit=None: ["https://learn.liferay.com/kb-article/a"])
 
-    monkeypatch.setattr(community, "discover_article_urls", fake_discover)
+    stats = community.run_resource_type(FakeClient(), "howto", "33317328", "community-howto")
 
-    stats = asyncio.run(community.run_resource_type(FakeCrawler(), "howto", "33317328", "community-howto"))
-
-    assert stats.crawl_errors == ["browser crashed"]
+    assert stats.crawl_errors == ["batch job b1 ended failed: boom"]
     assert stats.discovered_total == 1
 
 
+def test_run_resource_type_retries_transient_miss_once(monkeypatch, tmp_path):
+    configure_community_dirs(monkeypatch, tmp_path)
+    url = "https://learn.liferay.com/kb-article/a"
+    monkeypatch.setattr(community, "discover_article_urls", lambda client, rt, limit=None: [url])
+    monkeypatch.setattr(community, "extract_article",
+                        lambda html, u: None if html == "bad" else {"title": "A", "body": "text", "tags": {}})
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        def batch_scrape(self, urls, options):
+            self.calls += 1
+            yield SimpleNamespace(url=url, success=True, html="bad" if self.calls == 1 else "good")
+
+    client = FakeClient()
+    stats = community.run_resource_type(client, "howto", "33317328", "community-howto")
+
+    assert client.calls == 2
+    assert stats.fetch_failed == []
+    assert len(stats.outcomes) == 1
+
+
+def test_extract_article_converts_body_to_markdown():
+    html = """<html><body><h1 class="knowledge-article-title">T</h1>
+    <div class="knowledge-article-content"><p>Hello <strong>world</strong></p></div></body></html>"""
+    parsed = community.extract_article(html, "https://learn.liferay.com/kb-article/t")
+    assert parsed is not None
+    assert "Hello **world**" in parsed["body"]
+
+
 def test_main_exits_nonzero_when_run_all_reports_failure(monkeypatch):
-    async def fake_run_all(resource_type_filter, limit):
+    def fake_run_all(resource_type_filter, limit):
         return True
 
     monkeypatch.setattr(community, "run_all", fake_run_all)

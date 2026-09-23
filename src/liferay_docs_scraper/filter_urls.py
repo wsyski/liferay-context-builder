@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared URL/capability utilities for the crawl4ai pipeline's docs.
+"""Shared URL/capability utilities for the docs pipeline.
 
 Capability classification (matching learn.liferay.com/w/dxp URLs to one of
 the 14 capabilities listed on /w/dxp/index, plus the self-hosted prune
@@ -40,10 +40,6 @@ OUT_OF_SCOPE_PREFIXES: list[str] = []
 
 # (rule label, substring whose presence -- followed by more path -- excludes the URL)
 SELF_HOSTED_PRUNE_RULES = [
-    (
-        "deprecations-and-breaking-changes-reference subpage",
-        "/upgrading-liferay/deprecations-and-breaking-changes-reference/",
-    ),
     (
         "installing-earlier-liferay-versions-on-application-servers subpage",
         "/installing-earlier-liferay-versions-on-application-servers/",

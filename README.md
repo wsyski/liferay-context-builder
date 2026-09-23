@@ -1,343 +1,306 @@
 # liferay-context-builder
 
-Give Claude Code a local, source-backed Liferay DXP knowledge base it can
-actually read before answering.
+Builds a local, cited copy of the Liferay DXP documentation from
+`learn.liferay.com` so a coding agent can read the real docs before answering
+Liferay questions.
 
-`liferay-context-builder` turns the public Liferay docs into a local context
-library and pairs it with the `liferay-expert` Claude Code skill. The result is
-simple: when someone on the team asks a Liferay question, the assistant can
-look up the relevant docs, cite the original URL, and avoid guessing from model
-memory.
+- Official docs (`learn.liferay.com/w/dxp/*`, ~2,000 pages) and, optionally,
+  community How-To and Troubleshooting articles (`/kb-article/*`, ~4,800).
+- Plain Markdown files with source URL and fetch time in the frontmatter, plus a
+  JSONL search index. No vector database, no embeddings, no bundled Liferay
+  content.
+- Fetching goes through a self-hosted [Firecrawl](https://github.com/firecrawl/firecrawl)
+  v2 instance, using only its markdown and rawHtml formats (no LLM needed).
+- Refreshing is manual: run the builder when you want fresh docs.
+- Ships the `liferay-expert` agent skill that searches the library and cites it.
 
-It is built for team use:
-
-- Answers stay tied to official `learn.liferay.com` sources.
-- Every project can share the same local docs folder.
-- There is no bundled Liferay content, vector database, or embedding service to
-  manage.
-- A doctor command checks whether the docs and skill are ready.
-
-![Demo of liferay-context-builder in Codex](docs/assets/liferay-doc-demo.gif)
-
-[Download the MP4 demo](docs/assets/liferay-doc-demo.mp4)
-
-[Project page](https://mordonez.github.io/liferay-context-builder/) ·
-[PyPI package](https://pypi.org/project/liferay-context-builder/) · Python
-3.10-3.13 · [MIT license](LICENSE)
+Python 3.10-3.13 · [MIT license](LICENSE) · fork of
+[mordonez/liferay-context-builder](https://github.com/mordonez/liferay-context-builder)
 
 ## Quickstart
 
-From zero to source-backed Liferay answers in Claude Code:
-
 ```bash
-# 1. One-time browser setup for crawl4ai/Playwright
-uvx --from crawl4ai crawl4ai-setup
+# 1. Start Firecrawl (in your Firecrawl checkout) and wait until it is live
+docker compose up -d
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3002/v0/health/liveness   # -> 200
 
-# 2. Build the local Liferay DXP context library in ~/.liferay-docs
-uvx liferay-context-builder
+# 2. Build the official docs library (~20-25 min) into ~/.liferay-docs
+cd /path/to/liferay-context-builder
+uv run liferay-context-builder
 
-# 3. Install the Claude Code skill in your current project
-npx skills add mordonez/liferay-context-builder --skill liferay-expert -a claude-code
+# 3. Optional: community articles (~1 h)
+uv run liferay-context-builder-community
 
-# 4. Verify docs freshness and skill installation
-uvx --from liferay-context-builder liferay-context-builder-doctor
+# 4. Check the result
+uv run liferay-context-builder-doctor
+
+# 5. Stop Firecrawl
+cd /path/to/firecrawl && docker compose stop
 ```
 
-Then ask Claude Code something like:
-
-> How do I configure synonym sets in Liferay Search?
-
-The skill searches the local context library, reads the best matching pages,
-and cites the original `learn.liferay.com` URL.
-
-Keep `-a claude-code` in the install command. It avoids interactive installer
-edge cases where the skill can appear installed but not land in
-`.claude/skills/`.
+The PyPI package of the same name is the upstream project and does not use
+Firecrawl; run these commands from a checkout of this repository with `uv run`.
 
 ## Requirements
 
-- Python 3.10-3.13
-- [`uv`](https://docs.astral.sh/uv/)
-- Node/npm for `npx skills add`
+- Python 3.10-3.13 and [`uv`](https://docs.astral.sh/uv/)
+- A running self-hosted Firecrawl v2 API:
 
-`crawl4ai` uses Playwright. Run the browser setup once per machine before the
-first build:
+| Variable | Default | Purpose |
+|---|---|---|
+| `FIRECRAWL_API_URL` | `http://localhost:3002` | Firecrawl base URL |
+| `FIRECRAWL_API_KEY` | unset | Sent as `Authorization: Bearer <key>` when set |
+| `LIFERAY_DOCS_DIR` | `~/.liferay-docs` | Where the library is written and read |
 
 ```bash
-uvx --from crawl4ai crawl4ai-setup
+# Example: Firecrawl on another host, library inside the current repo
+export FIRECRAWL_API_URL=http://build-box:3002
+export LIFERAY_DOCS_DIR="$PWD/.liferay-docs"
+uv run liferay-context-builder
 ```
 
 ## How It Works
 
 ```mermaid
 flowchart LR
-  A[learn.liferay.com] --> B[crawl4ai BFS crawl]
-  B --> C[local Markdown in ~/.liferay-docs]
-  C --> D[search_index.jsonl and anomalies.jsonl]
-  C --> E[liferay-expert Claude Code skill]
+  A[learn.liferay.com] --> B[Firecrawl /v2/crawl and /v2/batch/scrape]
+  B --> C[Markdown in ~/.liferay-docs/raw]
+  C --> D[reports/filtered: search_index.jsonl, summary.json, anomalies.jsonl]
+  C --> E[liferay-expert skill]
   D --> E
-  E --> F[cited Liferay answers]
+  E --> F[answers citing learn.liferay.com URLs]
 ```
 
-The official context builder starts at
-`https://learn.liferay.com/w/dxp/index` and uses crawl4ai's BFS deep crawler to
-follow internal `/w/dxp/*` links. For each page, it extracts the article body,
-classifies the URL into a Liferay capability, and writes Markdown locally.
+**Official docs** (`liferay-context-builder`):
 
-The builder is intentionally boring:
+1. One Firecrawl crawl job starts at `https://learn.liferay.com/w/dxp/index` and
+   follows links:
+   `includePaths: ["^/w/dxp(/|$)"]`, `crawlEntireDomain: true`,
+   `sitemap: "skip"`, `maxDiscoveryDepth: 12`, `limit: 3000`, `delay: 1`.
+   The site's child sitemaps return empty bodies, so discovery relies on links.
+2. Each page is scraped with `includeTags: [".learn-article-content"]`, which
+   returns the article body without navigation, banners or cookie dialogs.
+3. The URL prefix decides the capability folder; pure table-of-contents pages go
+   to `raw/_navigation/`.
+4. Pages that failed or came back empty are re-scraped once in a batch job.
+5. Files from the previous run that were not rediscovered are checked directly:
+   still live → refreshed; HTTP 404/410 → moved to `raw/_removed/`.
+6. Reports and the search index are regenerated.
 
-- It fetches from the live Liferay docs when you run it; this package does not
-  redistribute Liferay documentation text.
-- It writes to one shared docs directory, so every project can use the same
-  context library.
-- It retries through crawl4ai, writes files atomically, and exits non-zero when
-  the crawl or page fetches fail.
-- It never starts a long build from inside the skill. If docs are missing, the
-  skill tells you which command to run.
+**Community articles** (`liferay-context-builder-community`): pages through the
+server-rendered search listing (`/learn-search?resource-type=...`, 60 links per
+page), batch-scrapes each article as raw HTML, extracts title, tags and
+`.knowledge-article-content`, converts it with `markdownify`, and retries
+missed articles once.
 
-## Where Files Go
+**Failure behaviour**
 
-By default, everything is written under:
+- Firecrawl unreachable → one-line error naming `FIRECRAWL_API_URL`, exit 1.
+- A Firecrawl job with no status for 3 polls, or no progress for 10 minutes →
+  crawl error, no pages are quarantined, exit 1.
+- Any page still failing after the retry is listed and the run exits 1; pages
+  already written stay valid.
 
-```text
-~/.liferay-docs
-```
-
-Use `LIFERAY_DOCS_DIR` when you want a repo-local or custom context library:
+## Command Reference
 
 ```bash
-export LIFERAY_DOCS_DIR="$PWD/.liferay-docs"
-uvx liferay-context-builder
-uvx --from liferay-context-builder liferay-context-builder-doctor
+uv run liferay-context-builder                      # full official-docs build
+uv run liferay-context-builder --max-pages 30       # quick smoke run
+uv run liferay-context-builder --max-depth 12 --max-pages 3000
+
+uv run liferay-context-builder-community                              # How-To + Troubleshooting
+uv run liferay-context-builder-community --resource-type howto        # one type
+uv run liferay-context-builder-community --resource-type troubleshooting --limit 100
+
+uv run liferay-context-builder-doctor                                 # status of docs + skill
+uv run liferay-context-builder-doctor --project-dir /path/to/project
 ```
 
-Layout:
+Example output of a smoke run:
+
+```text
+$ uv run liferay-context-builder --max-pages 30
+Starting crawl (~20-25 min usually) -- progress every 50 pages...
+
+Total discovered under /w/dxp: 30
+
+By capability (new / updated / unchanged / navigation):
+  cloud       :    4 total  (4 new, 0 updated, 0 unchanged, 1 navigation)
+  self-hosted :    5 total  (5 new, 0 updated, 0 unchanged, 0 navigation)
+  sites       :    4 total  (4 new, 0 updated, 0 unchanged, 0 navigation)
+  ...
+Total in scope: 29 (4 in raw/_navigation/, 25 in raw/{capability}/)
+Quarantined (URL verified as gone, HTTP 404/410): 0
+```
+
+```text
+$ uv run liferay-context-builder-community --resource-type howto --limit 10
+Discovered: 10
+Written: 10
+Fetch failures: 0
+By capability:
+  _uncategorized: 5
+  content-management-system: 3
+  digital-asset-management: 1
+  sites: 1
+```
+
+Timings: official docs ~20-25 minutes on a warm Firecrawl stack (the first crawl
+after a cold `docker compose up` is noticeably slower); community ~1 hour.
+The skill flags docs older than about 7 days, so a weekly refresh is plenty.
+
+## The Library
 
 ```text
 ~/.liferay-docs/
-  raw/{capability}/*.md
-  raw/_navigation/{capability}/*.md
-  raw/_removed/{capability}/*.md
+  raw/{capability}/*.md                      official docs (read first)
+  raw/_navigation/{capability}/*.md          table-of-contents pages
+  raw/_removed/{capability}/*.md             pages confirmed gone (404/410)
   raw/community-howto/{capability}/*.md
   raw/community-troubleshooting/{capability}/*.md
   reports/filtered/
-    search_index.jsonl
-    anomalies.jsonl
-    summary.json
-    *_urls.txt
+    search_index.jsonl                       one JSON line per page
+    summary.json                             counts of the last run
+    anomalies.jsonl                          short/odd pages worth a check
+    {capability}_urls.txt                    in-scope URLs per capability
+    removed_log.jsonl                        quarantine log
 ```
 
-`raw/{capability}/*.md` is the main official-docs library the skill reads first.
-`raw/_navigation/` keeps table-of-contents/navigation pages out of normal
-answers while preserving them. `raw/_removed/` holds pages only after the
-builder directly confirms their original URL is gone.
+Capabilities: `search`, `commerce`, `development`, `sites`, `low-code`,
+`security`, `self-hosted`, `content-management-system`, `integration`, `cloud`,
+`digital-asset-management`, `personalization`, `ai`, `getting-started`.
+Community articles without a usable capability tag go to `_uncategorized/`.
 
-## Refreshing The Context Library
+Official page, e.g. `raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md`:
 
-Run the builder again whenever you want fresh docs:
+```markdown
+---
+url: "https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/cloud-native-experience/cne-kubernetes-ready"
+capability: self-hosted
+fetched_at: "2026-09-23T15:58:04Z"
+content_hash: "sha256:201204a2871c69a8e5fdc2ca71d3abc6f1734087bba4b9d60d681091110e7b4c"
+---
+[Cloud Native Experience Kubernetes Ready](https://learn.liferay.com/w/dxp/...)
+=====
+
+The Kubernetes Ready path of the Cloud Native Experience (CNE) deploys Liferay DXP
+on any CNCF-conformant Kubernetes cluster using the official `liferay-default` Helm chart. ...
+```
+
+Community article, e.g. `raw/community-howto/_uncategorized/auditing-the-remote-client-ip-address-changed-after-upgrade.md`:
+
+```markdown
+---
+url: "https://learn.liferay.com/kb-article/auditing-the-remote-client-ip-address-changed-after-upgrade"
+source_type: community-howto
+capability: uncategorized
+deployment_approach: "Liferay Self-Hosted"
+applicable_versions: "DXP 7.4, DXP 7.0"
+resource_type: "How To"
+fetched_at: "2026-09-23T16:00:48Z"
+content_hash: "sha256:30a53478..."
+---
+# Auditing the remote client IP address changed after upgrade
+
+## Issue
+
+* After upgrading from Liferay 7.0 to a more recent Quarterly Release ...
+```
+
+Search index line (`reports/filtered/search_index.jsonl`):
+
+```json
+{"title": "Cloud Native Experience Cne Kubernetes Ready", "url": "https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/cloud-native-experience/cne-kubernetes-ready", "source_type": "official", "capability": "self-hosted", "path": "raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md", "headings": [], "fetched_at": "2026-09-23T15:58:04Z"}
+```
+
+Searching it by hand:
 
 ```bash
-uvx liferay-context-builder
+cd ~/.liferay-docs
+grep -i "synonym" reports/filtered/search_index.jsonl | head        # shortlist by title/headings
+grep -ril "client extension" raw/development/ | head                # full-text in one capability
+grep -ril "ClassNotFoundException" raw/community-troubleshooting/   # error text -> troubleshooting
+jq '{discovered_total, fetch_failed_count}' reports/filtered/summary.json
 ```
 
-A normal full run usually takes tens of minutes. For a smoke test:
+## The Skill
+
+`skills/liferay-expert/SKILL.md` teaches an agent to find the library
+(`$LIFERAY_DOCS_DIR`, else `~/.liferay-docs`), shortlist via the search index,
+read the matching Markdown, and cite the frontmatter `url`. Community articles
+are labelled as community content and official docs win when both cover a
+topic. The skill never starts a build itself; when docs are missing or older
+than ~7 days it tells you which command to run.
+
+Install it into a Claude Code project:
 
 ```bash
-uvx liferay-context-builder --max-pages 200
+npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code
+# or copy it manually
+mkdir -p .claude/skills/liferay-expert && cp /path/to/liferay-context-builder/skills/liferay-expert/SKILL.md .claude/skills/liferay-expert/
 ```
 
-Useful options:
+Example questions it answers from the library:
 
-```bash
-uvx liferay-context-builder --max-depth 12
-uvx liferay-context-builder --max-pages 3000
-```
-
-Each full run starts from the current site state. If a previously known page is
-not rediscovered by BFS, the builder checks that page directly before moving it
-to `raw/_removed/`. If the page is still alive, it refreshes it directly and
-records the BFS coverage gap in the reports.
-
-## Community Articles
-
-Community articles are optional, larger, and lower-authority than the official
-DXP docs:
-
-```bash
-uvx --from liferay-context-builder liferay-context-builder-community
-```
-
-This fetches Liferay community How-To and Troubleshooting articles from
-`learn.liferay.com/kb-article/*`. They are stored separately:
-
-```text
-raw/community-howto/{capability}/*.md
-raw/community-troubleshooting/{capability}/*.md
-```
-
-Many community articles have no usable capability tag, so they go to
-`_uncategorized/`. The skill treats community content as secondary evidence and
-says so when citing it.
-
-Useful commands:
-
-```bash
-# Only How-To articles
-uvx --from liferay-context-builder liferay-context-builder-community --resource-type howto
-
-# Smaller test run per resource type
-uvx --from liferay-context-builder liferay-context-builder-community --limit 100
-```
-
-Community builds can take much longer than the official-docs build because they
-fetch thousands of additional articles.
-
-## Installing The Skill
-
-Install `liferay-expert` into each Claude Code project where you want Liferay
-help:
-
-```bash
-npx skills add mordonez/liferay-context-builder --skill liferay-expert -a claude-code
-```
-
-Manual install also works: place the skill file at:
-
-```text
-.claude/skills/liferay-expert/SKILL.md
-```
-
-The skill resolves docs the same way the builder does:
-
-1. `$LIFERAY_DOCS_DIR`, if set.
-2. `~/.liferay-docs`, otherwise.
-
-When answering, it searches `reports/filtered/search_index.jsonl` when present,
-falls back to normal file search under `raw/`, reads Markdown files directly,
-and cites the `url:` frontmatter. Official docs are preferred over community
-articles when both cover the same topic.
+> How do I configure synonym sets in Liferay Search?
+>
+> Which Helm chart does the Cloud Native Experience Kubernetes path use?
+>
+> After upgrading to a quarterly release the audit table stores a different client IP — why?
 
 ## Doctor
 
-Use the doctor when something feels off:
+```text
+$ uv run liferay-context-builder-doctor
+Docs dir: ~/.liferay-docs
+Official docs: OK (25 markdown files, 30 discovered in last report)
+Community docs: 10 markdown files
+Official freshness: 2026-09-23 .. 2026-09-23
+Search index: 35 entries
+Anomalies report: 23 entries
+Claude Code skill: MISSING (/path/to/project/.claude/skills/liferay-expert/SKILL.md)
 
-```bash
-uvx --from liferay-context-builder liferay-context-builder-doctor
+Next steps:
+  npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code
 ```
 
-It checks:
-
-- Which docs directory is active.
-- Whether official Markdown exists.
-- How many community Markdown files exist.
-- The official-docs freshness window.
-- Search index and anomaly report entry counts.
-- Whether `.claude/skills/liferay-expert/SKILL.md` exists in the current
-  project.
-
-To inspect a different project directory:
-
-```bash
-uvx --from liferay-context-builder liferay-context-builder-doctor --project-dir /path/to/project
-```
-
-The doctor does not build docs and does not install the skill. It only reports
-status and prints the next command to run.
-
-## Reports
-
-The builder writes agent-facing reports under `reports/filtered/`.
-
-`search_index.jsonl` is a local retrieval index. Each JSON line includes title,
-source URL, source type, capability, file path, headings, and `fetched_at`. The
-skill uses it first because it is faster and cleaner than searching every
-Markdown file.
-
-`anomalies.jsonl` is an informational scrape-quality report. It flags signals
-like very short bodies, missing titles, known error markers, unusually large
-pages, and large body-size swings versus the previous local copy. It does not
-mean a page is unusable; it means the page may deserve a quick check before you
-trust or cite it heavily.
-
-`summary.json` records the latest run counts, crawl failures, direct refreshes,
-coverage gaps, and search index size.
+It reports the active docs directory, official and community file counts, the
+freshness window, index and anomaly counts, and whether the skill is installed
+in the project. It never builds or installs anything.
 
 ## Troubleshooting
 
-**`crawl4ai` or browser errors on the first run**
+**`ERROR: Firecrawl not reachable at http://localhost:3002`** — start Firecrawl
+(`docker compose up -d` in its checkout) or point `FIRECRAWL_API_URL` at the
+running instance.
 
-Run the Playwright setup again:
+**`crawl job ... stalled` or `status unavailable`** — the Firecrawl job stopped
+progressing (worker crash, stack restart). Check `docker compose logs api` in
+the Firecrawl checkout, then rerun.
 
-```bash
-uvx --from crawl4ai crawl4ai-setup
-```
+**Run ends with fetch failures** — the listed pages failed twice. Rerun later;
+everything already written stays valid and nothing is quarantined on a failed
+crawl.
 
-**Claude Code says the skill is missing**
+**Agent says docs are missing** — check `echo "$LIFERAY_DOCS_DIR"`; the builder
+and the skill must use the same directory. Run the doctor.
 
-Run the install command from the project where you are using Claude Code:
-
-```bash
-npx skills add mordonez/liferay-context-builder --skill liferay-expert -a claude-code
-```
-
-Then verify:
-
-```bash
-uvx --from liferay-context-builder liferay-context-builder-doctor
-```
-
-**Claude Code says docs are missing**
-
-Check whether you are using a custom docs directory:
-
-```bash
-echo "$LIFERAY_DOCS_DIR"
-```
-
-If it is empty, the skill expects `~/.liferay-docs`. If it points somewhere
-else, run the builder with that same environment variable.
-
-**Docs are stale**
-
-Refresh official docs:
-
-```bash
-uvx liferay-context-builder
-```
-
-The doctor warns when official docs are older than about seven days.
-
-**A build stops partway through**
-
-Rerun the same command. Already written Markdown remains usable, but a failed
-run exits non-zero and avoids treating untouched pages as removed.
-
-**Community answers feel weaker than official docs**
-
-That is expected. Community How-To and Troubleshooting articles are useful for
-practical cases and errors, but the skill should label them as community
-content and prefer official docs when official docs answer the question.
+**Docs are stale** — rerun `uv run liferay-context-builder`.
 
 ## Development
 
 ```bash
 uv sync --group dev
-uv run ruff check .
-uv run --with pytest python -m pytest
+uv run --group dev pytest -q
+uv run --group dev ruff check src tests
 uv build
 ```
 
-Run `uv sync --group dev` once before local development so the project and dev
-tools are installed into uv's project environment. The pytest command uses
-`python -m pytest` with `--with pytest` because older or unsynced uv
-environments can fail to find the `pytest` console script even when Python can
-run the module.
-
-CI runs lint, tests, and package build on Python 3.10, 3.11, 3.12, and 3.13.
-It does not run a real docs build. Release publishing is documented in
-[`docs/release.md`](docs/release.md).
+Tests mock the Firecrawl API; no network access is needed. CI runs lint, tests
+and a package build on Python 3.10-3.13. Design decisions are in
+[`docs/adr/`](docs/adr/).
 
 ## License
 
 [MIT](LICENSE) applies to this tool and skill only. Liferay documentation
-content remains Liferay's content and is fetched locally by each user.
+content remains Liferay's and is fetched locally by each user.

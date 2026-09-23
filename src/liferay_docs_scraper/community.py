@@ -7,17 +7,17 @@ Separate from pipeline.py (the weekly /w/dxp/* scrape) because the
 discovery mechanism is completely different and this content is much
 larger and lower-authority:
 
-  - Discovery: /w/dxp/* is reached by BFS link-following from one seed page.
-    kb-article/* pages aren't linked from /w/dxp/* in any systematic way;
-    the only way to enumerate them is learn.liferay.com's own faceted
+  - Discovery: /w/dxp/* is reached by a link-following crawl from one seed
+    page. kb-article/* pages aren't linked from /w/dxp/* in any systematic
+    way; the only way to enumerate them is learn.liferay.com's own faceted
     search UI (/learn-search?resource-type=X), a JS-rendered, paginated
     (start=<page number>&delta=<page size>) results list. This module
     pages through that listing purely to collect kb-article URLs, then
-    fetches each URL directly with crawl4ai's arun_many -- a flat list
-    fetch, not a BFS.
+    fetches each URL directly with Firecrawl's batch scrape -- a flat list
+    fetch, not a crawl.
   - Volume: ~1,400 How-To + ~3,700 Troubleshooting articles, roughly 3x
     the size of the official /w/dxp docs. Expect this to take
-    considerably longer than pipeline.py's ~30-40 minutes -- run it
+    considerably longer than pipeline.py's ~20-25 minutes -- run it
     separately, not as part of the weekly refresh.
   - Authority: every article carries a standard disclaimer ("How To/
     Troubleshooting articles are not official guidelines or officially
@@ -34,10 +34,10 @@ larger and lower-authority:
     elements (each preceded by an <h6> label: Capability, Feature,
     Deployment Approach, Applicable Versions, Resource Type). None of
     those live inside .knowledge-article-content, so each article is
-    fetched WITHOUT a css_selector (the full page) and cleaned locally:
-    BeautifulSoup pulls out the relevant elements, then crawl4ai's own
-    DefaultMarkdownGenerator converts just .knowledge-article-content's
-    inner HTML to Markdown -- one fetch per article, not two.
+    fetched as rawHtml for the full page and cleaned locally: BeautifulSoup
+    pulls out the relevant elements, then markdownify converts just
+    .knowledge-article-content's inner HTML to Markdown -- one fetch per
+    article, not two.
   - Capability mapping: each article's "Capability:" tag text is matched
     against filter_urls.CAPABILITIES' 14 names (CAPABILITY_TAG_MAP below).
     Real-world tag text varies (older articles use different label
@@ -50,12 +50,11 @@ larger and lower-authority:
     so CAPABILITY_TAG_MAP can be extended later without re-scraping.
 
 Usage:
-    uvx --from liferay-context-builder liferay-context-builder-community
-    uvx --from liferay-context-builder liferay-context-builder-community --resource-type howto
+    uv run liferay-context-builder-community
+    uv run liferay-context-builder-community --resource-type howto
 """
 
 import argparse
-import asyncio
 import hashlib
 import json
 import re
@@ -66,9 +65,9 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
-from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from markdownify import markdownify
 
+from . import fetcher
 from .filter_urls import atomic_write_text, quote_frontmatter_value, resolve_docs_dir, safe_filename_stem
 from .index import (
     ANOMALIES_NAME,
@@ -87,6 +86,10 @@ RESOURCE_TYPES = {
 }
 PAGE_SIZE = 60
 KB_ARTICLE_URL_PATTERN = re.compile(r"https://learn\.liferay\.com/kb-article/[a-zA-Z0-9\-]+")
+
+# listing is server-rendered (spike) -- no JS wait needed
+LISTING_OPTIONS = {"formats": ["rawHtml"], "waitFor": 0, "maxAge": 0, "timeout": 30000}
+ARTICLE_OPTIONS = {"formats": ["rawHtml"], "onlyMainContent": False, "maxAge": 0, "timeout": 30000}
 
 ROOT = resolve_docs_dir()
 RAW_DIR = ROOT / "raw"
@@ -149,8 +152,8 @@ class RunStats:
     outcomes: list[ArticleOutcome] = field(default_factory=list)
 
 
-async def discover_article_urls(
-    crawler: AsyncWebCrawler, resource_type_id: str, limit: int | None = None,
+def discover_article_urls(
+    client, resource_type_id: str, limit: int | None = None,
 ) -> list[str]:
     """Page through /learn-search?resource-type=X, PAGE_SIZE entries at a
     time, until a page returns no new kb-article links.
@@ -158,24 +161,15 @@ async def discover_article_urls(
     Extracts hrefs from the parsed HTML rather than regexing the Markdown:
     a handful of slugs contain characters just outside
     KB_ARTICLE_URL_PATTERN's class (e.g. an apostrophe), and regexing
-    Markdown link text truncated those into bogus short URLs."""
+    Markdown link text truncated those into bogus short URLs.
+
+    Spike: the listing is server-rendered -- 60 links per page without any
+    JS wait needed."""
     urls: set[str] = set()
-    listing_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        wait_for=(
-            "js:() => document.querySelectorAll('a[href*=\"kb-article\"]').length > 0 "
-            "|| document.body.innerText.includes('There are no results')"
-        ),
-        page_timeout=30000,
-        semaphore_count=3,
-        max_retries=2,
-        mean_delay=0.25,
-        max_range=0.75,
-    )
     page = 1
     while True:
         url = f"{SEARCH_URL}?q=&resource-type={resource_type_id}&delta={PAGE_SIZE}&start={page}"
-        result = await crawler.arun(url=url, config=listing_config)
+        result = client.scrape(url, LISTING_OPTIONS)
         if not result.success:
             raise RuntimeError(f"search listing page {page} failed: {url}")
         page_urls = extract_article_links(result.html)
@@ -246,9 +240,7 @@ def extract_article(html: str, url: str) -> dict | None:
         values = [a.get_text(strip=True) for a in tag_el.find_all("a")]
         tags[label] = ", ".join(values) if values else tag_el.get_text(" ", strip=True)
 
-    body_markdown = DefaultMarkdownGenerator().generate_markdown(
-        input_html=str(content_el), base_url=url,
-    ).raw_markdown
+    body_markdown = markdownify(str(content_el), heading_style="ATX")
 
     return {"title": title, "body": body_markdown, "tags": tags}
 
@@ -277,81 +269,84 @@ def build_frontmatter(url: str, source_type: str, capability: str | None, tags: 
     return "\n".join(lines)
 
 
-async def run_resource_type(
-    crawler: AsyncWebCrawler, key: str, resource_type_id: str, source_type: str, limit: int | None = None,
+def handle_article(result, source_type: str, stats: RunStats) -> bool:
+    """Parse and write one fetched article. Returns False (without touching
+    stats.fetch_failed) on any failure -- a failed/unparseable fetch or
+    a per-article processing error -- so the caller can retry it once
+    before giving up for good."""
+    if not result.success:
+        return False
+
+    # One bad article (unexpected HTML shape, filesystem edge case, ...)
+    # must not kill a run that's fetching thousands of pages -- log and
+    # move on rather than letting an exception propagate out of the loop.
+    try:
+        parsed = extract_article(result.html, result.url)
+        if parsed is None:
+            return False
+
+        tag_text = parsed["tags"].get("Capability")
+        capability = map_capability(tag_text)
+        if tag_text and capability is None:
+            stats.unmapped_capability_tags[tag_text] = stats.unmapped_capability_tags.get(tag_text, 0) + 1
+
+        slug = safe_slug(result.url)
+        bucket = capability or "_uncategorized"
+        out_path = RAW_DIR / source_type / bucket / f"{slug}.md"
+
+        body = f"# {parsed['title']}\n\n{parsed['body']}"
+        new_content = build_frontmatter(result.url, source_type, capability, parsed["tags"], body) + body
+
+        previous_snapshot = read_body_snapshot(out_path)
+        old_hash = read_existing_hash(out_path)
+        existed_before = out_path.exists()
+        atomic_write_text(out_path, new_content)
+        append_anomalies(
+            FILTERED_DIR / ANOMALIES_NAME,
+            detect_anomalies(
+                path=out_path,
+                url=result.url,
+                source_type=source_type,
+                capability=capability or "_uncategorized",
+                body=body,
+                previous=previous_snapshot,
+            ),
+        )
+        new_hash = read_existing_hash(out_path)
+        status = "new" if not existed_before else ("unchanged" if old_hash == new_hash else "updated")
+        stats.outcomes.append(ArticleOutcome(result.url, capability, slug, status))
+        return True
+    except Exception as exc:  # noqa: BLE001 - any per-article failure is non-fatal here
+        print(f"  ERROR processing {result.url}: {exc}")
+        return False
+
+
+def run_resource_type(
+    client, key: str, resource_type_id: str, source_type: str, limit: int | None = None,
 ) -> RunStats:
     stats = RunStats()
     print(f"\n=== {key} ({source_type}) ===")
     print("Discovering articles...")
-    urls = await discover_article_urls(crawler, resource_type_id, limit=limit)
+    urls = discover_article_urls(client, resource_type_id, limit=limit)
     stats.discovered_total = len(urls)
     print(f"  {len(urls)} URLs found")
 
-    fetch_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        wait_for="css:body",
-        page_timeout=30000,
-        semaphore_count=3,
-        max_retries=2,
-        mean_delay=0.25,
-        max_range=0.75,
-        stream=True,
-    )
-
-    done = 0
     try:
-        stream = await crawler.arun_many(urls=urls, config=fetch_config)
-        async for result in stream:
-            done += 1
+        retry = []
+        for done, result in enumerate(client.batch_scrape(urls, ARTICLE_OPTIONS), start=1):
             if done % 200 == 0:
                 print(f"  ...{done}/{len(urls)}")
+            if not handle_article(result, source_type, stats):
+                retry.append(result.url)
 
-            if not result.success:
-                stats.fetch_failed.append(result.url)
-                continue
-
-            # One bad article (unexpected HTML shape, filesystem edge case, ...)
-            # must not kill a run that's fetching thousands of pages -- log and
-            # move on rather than letting an exception propagate out of the loop.
-            try:
-                parsed = extract_article(result.html, result.url)
-                if parsed is None:
+        # Spike: ~5% transient misses, all fine on retry.
+        if retry:
+            print(f"  retrying {len(retry)} articles once...", flush=True)
+            for result in client.batch_scrape(retry, ARTICLE_OPTIONS):
+                if not handle_article(result, source_type, stats):
                     stats.fetch_failed.append(result.url)
-                    continue
-
-                tag_text = parsed["tags"].get("Capability")
-                capability = map_capability(tag_text)
-                if tag_text and capability is None:
-                    stats.unmapped_capability_tags[tag_text] = stats.unmapped_capability_tags.get(tag_text, 0) + 1
-
-                slug = safe_slug(result.url)
-                bucket = capability or "_uncategorized"
-                out_path = RAW_DIR / source_type / bucket / f"{slug}.md"
-
-                body = f"# {parsed['title']}\n\n{parsed['body']}"
-                new_content = build_frontmatter(result.url, source_type, capability, parsed["tags"], body) + body
-
-                previous_snapshot = read_body_snapshot(out_path)
-                old_hash = read_existing_hash(out_path)
-                existed_before = out_path.exists()
-                atomic_write_text(out_path, new_content)
-                append_anomalies(
-                    FILTERED_DIR / ANOMALIES_NAME,
-                    detect_anomalies(
-                        path=out_path,
-                        url=result.url,
-                        source_type=source_type,
-                        capability=capability or "_uncategorized",
-                        body=body,
-                        previous=previous_snapshot,
-                    ),
-                )
-                new_hash = read_existing_hash(out_path)
-                status = "new" if not existed_before else ("unchanged" if old_hash == new_hash else "updated")
-                stats.outcomes.append(ArticleOutcome(result.url, capability, slug, status))
-            except Exception as exc:  # noqa: BLE001 - any per-article failure is non-fatal here
-                print(f"  ERROR processing {result.url}: {exc}")
-                stats.fetch_failed.append(result.url)
+    except fetcher.FirecrawlUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 - keep partial report data for long runs
         stats.crawl_errors.append(str(exc))
         print(f"\nERROR: fetch interrupted before finishing {key}: {exc}", file=sys.stderr)
@@ -400,25 +395,26 @@ def print_summary(key: str, stats: RunStats) -> None:
             print(f'  "{tag}": {count} articles')
 
 
-async def run_all(resource_type_filter: str | None, limit: int | None) -> bool:
+def run_all(resource_type_filter: str | None, limit: int | None) -> bool:
     any_failures = False
     ensure_anomalies_report(FILTERED_DIR)
-    async with AsyncWebCrawler() as crawler:
-        for key, (resource_type_id, source_type) in RESOURCE_TYPES.items():
-            if resource_type_filter and key != resource_type_filter:
-                continue
-            # A crash partway through one resource type (e.g. the browser
-            # context dying) shouldn't cost the other resource type its
-            # multi-hour run too -- report what happened and keep going.
-            try:
-                stats = await run_resource_type(crawler, key, resource_type_id, source_type, limit=limit)
-            except Exception as exc:  # noqa: BLE001
-                print(f"\n{key} FAILED COMPLETELY: {exc}")
-                any_failures = True
-                continue
-            write_report(source_type, stats)
-            print_summary(source_type, stats)
-            any_failures = any_failures or bool(stats.fetch_failed) or bool(stats.crawl_errors)
+    for key, (resource_type_id, source_type) in RESOURCE_TYPES.items():
+        if resource_type_filter and key != resource_type_filter:
+            continue
+        # A crash partway through one resource type shouldn't cost the
+        # other resource type its multi-hour run too -- report what
+        # happened and keep going.
+        try:
+            stats = run_resource_type(fetcher, key, resource_type_id, source_type, limit=limit)
+        except fetcher.FirecrawlUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n{key} FAILED COMPLETELY: {exc}")
+            any_failures = True
+            continue
+        write_report(source_type, stats)
+        print_summary(source_type, stats)
+        any_failures = any_failures or bool(stats.fetch_failed) or bool(stats.crawl_errors)
     return any_failures
 
 
@@ -431,7 +427,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be greater than zero")
-    failed = asyncio.run(run_all(args.resource_type, args.limit))
+    try:
+        failed = run_all(args.resource_type, args.limit)
+    except fetcher.FirecrawlUnavailable as exc:
+        print(f"ERROR: {exc}\n  Set FIRECRAWL_API_URL or start the stack: "
+              "cd /path/to/firecrawl && docker compose up -d", file=sys.stderr)
+        sys.exit(1)
     if failed:
         sys.exit(1)
 

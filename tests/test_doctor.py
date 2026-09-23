@@ -33,3 +33,11 @@ def test_main_exits_nonzero_when_docs_or_skill_are_missing(monkeypatch, tmp_path
         doctor.main()
 
     assert exc_info.value.code == 1
+
+
+def test_next_steps_point_at_firecrawl(capsys, tmp_path):
+    result = doctor.inspect_installation(tmp_path / "docs", tmp_path / "project")
+    doctor.print_result(result)
+    out = capsys.readouterr().out
+    assert "crawl4ai" not in out
+    assert "FIRECRAWL_API_URL" in out

@@ -60,3 +60,11 @@ def test_atomic_write_text_replaces_existing_file_and_cleans_temp(tmp_path):
 
     assert path.read_text(encoding="utf-8") == "new"
     assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_breaking_changes_reference_subpages_are_kept():
+    url = ("https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/upgrading-liferay/"
+           "deprecations-and-breaking-changes-reference/2025-q1-breaking-changes")
+    result = filter_urls.classify_url(url)
+    assert result["capability"] == "self-hosted"
+    assert result["prune_reason"] is None
