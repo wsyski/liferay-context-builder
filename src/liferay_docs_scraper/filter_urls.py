@@ -38,6 +38,12 @@ CAPABILITIES = {
 # scope now; nothing under /w/dxp is deliberately excluded anymore.
 OUT_OF_SCOPE_PREFIXES: list[str] = []
 
+# In-scope-but-not-a-capability paths: the /w/dxp root index is the capability
+# listing itself, so it has no capability bucket. The crawl starts there (see
+# pipeline.SEED_URL), so it's rediscovered every run and must be recognised as
+# expected rather than reported as an unexpected URL.
+NON_CAPABILITY_PATHS = frozenset({"/w/dxp/index"})
+
 # (rule label, substring whose presence -- followed by more path -- excludes the URL)
 SELF_HOSTED_PRUNE_RULES = [
     (
@@ -92,9 +98,9 @@ def classify_url(url: str) -> dict:
     Returns a dict with:
       - capability: matched capability name, or None if out of scope
       - prune_reason: self-hosted prune rule label, or None
-      - known_out_of_scope: True if it matches one of the known-excluded
-        capabilities rather than being an unrecognized/"odd" URL worth
-        flagging for manual review
+      - known_out_of_scope: True if it's a known-excluded capability or a
+        known non-capability page (the /w/dxp root index) rather than an
+        unrecognized/"odd" URL worth flagging for manual review
     """
     path = urlparse(url).path
     matched_capability = None
@@ -104,7 +110,9 @@ def classify_url(url: str) -> dict:
             break
 
     if matched_capability is None:
-        known_out_of_scope = any(matches_prefix(path, prefix) for prefix in OUT_OF_SCOPE_PREFIXES)
+        known_out_of_scope = path in NON_CAPABILITY_PATHS or any(
+            matches_prefix(path, prefix) for prefix in OUT_OF_SCOPE_PREFIXES
+        )
         return {"capability": None, "prune_reason": None, "known_out_of_scope": known_out_of_scope}
 
     reason = prune_reason(path) if matched_capability == "self-hosted" else None

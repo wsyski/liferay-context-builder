@@ -62,6 +62,20 @@ def test_atomic_write_text_replaces_existing_file_and_cleans_temp(tmp_path):
     assert list(path.parent.glob("*.tmp")) == []
 
 
+def test_dxp_root_index_is_known_not_unexpected():
+    result = filter_urls.classify_url("https://learn.liferay.com/w/dxp/index")
+
+    assert result["capability"] is None
+    assert result["known_out_of_scope"] is True
+
+
+def test_unrecognized_non_capability_url_is_still_flagged():
+    result = filter_urls.classify_url("https://learn.liferay.com/w/dxp/some-new-page")
+
+    assert result["capability"] is None
+    assert result["known_out_of_scope"] is False
+
+
 def test_breaking_changes_reference_subpages_are_kept():
     url = ("https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/upgrading-liferay/"
            "deprecations-and-breaking-changes-reference/2025-q1-breaking-changes")
