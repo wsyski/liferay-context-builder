@@ -1,6 +1,6 @@
 ---
 name: liferay-expert
-description: Answer Liferay DXP technical questions by searching and reading the local context library built from learn.liferay.com/w/dxp. Use when the user asks how something works in Liferay DXP, wants configuration/troubleshooting steps, or asks about a specific capability (search, commerce, sites, security, self-hosted installation/upgrades, development, cloud, low-code, content management, digital asset management, personalization, integration, AI, or getting started).
+description: Answer Liferay DXP/Portal 7.x and quarterly-release questions grounded in local sources — the context library built from learn.liferay.com/w/dxp, and references/liferay-platform.md for platform internals and upgrades. Use when the user asks how something works in Liferay DXP, wants configuration/troubleshooting/upgrade steps, asks about a capability (search, commerce, sites, security, self-hosted, development, cloud, low-code, content management, digital asset management, personalization, integration, AI, getting started), or when the repo has portal-kernel/, service.xml, rest-config.yaml, client-extensions/, or liferay.workspace.product.
 ---
 
 # Liferay Expert
@@ -100,6 +100,18 @@ no `source_type` field at all for official docs).
 
 When the right capability isn't obvious, grep 2-3 likely candidates rather
 than guessing one and stopping.
+
+## Reference files
+
+Topic detail beyond the docs lookup lives in files next to this skill. Read the
+one that matches the question.
+
+| Topic | File |
+|---|---|
+| Platform internals: OSGi/DS, Service Builder, REST Builder, Client Extensions | `references/liferay-platform.md` |
+| Portal source grounding, API contracts, default behaviour | `references/liferay-platform.md` |
+| Version upgrades and breaking changes | `references/liferay-platform.md` |
+| Choosing an extension point (7.4+) | `references/liferay-platform.md` |
 
 ## Notes
 

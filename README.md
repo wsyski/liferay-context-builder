@@ -12,7 +12,8 @@ Liferay questions.
 - Fetching goes through a self-hosted [Firecrawl](https://github.com/firecrawl/firecrawl)
   v2 instance, using only its markdown and rawHtml formats (no LLM needed).
 - Refreshing is manual: run the builder when you want fresh docs.
-- Ships the `liferay-expert` agent skill that searches the library and cites it.
+- Ships the `liferay-expert` agent skill: it searches the library, cites it, and
+  (via `references/liferay-platform.md`) covers platform internals and upgrades.
 
 Python 3.10-3.13 · [MIT license](LICENSE) · fork of
 [mordonez/liferay-context-builder](https://github.com/mordonez/liferay-context-builder)
@@ -229,15 +230,20 @@ jq '{discovered_total, fetch_failed_count}' reports/filtered/summary.json
 (`$LIFERAY_DOCS_DIR`, else `~/.liferay-docs`), shortlist via the search index,
 read the matching Markdown, and cite the frontmatter `url`. Community articles
 are labelled as community content and official docs win when both cover a
-topic. The skill never starts a build itself; when docs are missing or older
-than ~7 days it tells you which command to run.
+topic. A Reference-files table routes platform questions to
+`references/liferay-platform.md` (OSGi/DS, Service Builder, REST Builder,
+Client Extensions, extension-point choice, and the version-upgrade /
+breaking-changes workflow), so the docs lookup stays focused. The skill never
+starts a build itself; when docs are missing or older than ~7 days it tells you
+which command to run.
 
-Install it into a Claude Code project:
+Install it into a Claude Code project (copy the whole skill directory, so
+`references/` comes with it):
 
 ```bash
 npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code
 # or copy it manually
-mkdir -p .claude/skills/liferay-expert && cp /path/to/liferay-context-builder/skills/liferay-expert/SKILL.md .claude/skills/liferay-expert/
+mkdir -p .claude/skills/liferay-expert && cp -r /path/to/liferay-context-builder/skills/liferay-expert/. .claude/skills/liferay-expert/
 ```
 
 Example questions it answers from the library:
@@ -247,6 +253,12 @@ Example questions it answers from the library:
 > Which Helm chart does the Cloud Native Experience Kubernetes path use?
 >
 > After upgrading to a quarterly release the audit table stores a different client IP — why?
+
+Platform questions it answers from `references/liferay-platform.md`:
+
+> Which extension point should a custom workflow action use in 7.4+?
+>
+> What changed in an API between 7.4 GA3 and the 2026.Q2 release?
 
 ## Doctor
 
