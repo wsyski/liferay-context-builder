@@ -1,20 +1,24 @@
 # liferay-context-builder
 
-Builds a local, cited copy of the Liferay DXP documentation from
-`learn.liferay.com` so a coding agent can read the real docs before answering
-Liferay questions.
+Builds a local, cited, searchable copy of Liferay documentation so a coding agent
+can read the real docs before answering Liferay questions. It is built for agents,
+not humans: every design choice favours an agent finding the right page quickly
+with bounded output.
 
-- Official docs (`learn.liferay.com/w/dxp/*`, ~2,000 pages) and, optionally,
-  community How-To and Troubleshooting articles (`/kb-article/*`, ~4,800) and
-  recent community blog posts (`liferay.dev/blogs`, 2022 onward).
-- Plain Markdown files with source URL and fetch time in the frontmatter, plus a
-  JSONL search index. No vector database, no embeddings, no bundled Liferay
+- **Three sources**, in decreasing authority: the official docs
+  (`learn.liferay.com/w/dxp/*`, ~1,700 pages), community How-To and Troubleshooting
+  articles (`/kb-article/*`, ~4,900) and recent community blog posts
+  (`liferay.dev/blogs`, 2022 onward, ~350 technical posts).
+- **Plain Markdown files** with source URL, fetch time and metadata in the
+  frontmatter, plus two indexes: a JSONL catalogue and an SQLite FTS5 full-text
+  index over every page body. No vector database, no embeddings, no bundled Liferay
   content.
-- Fetching goes through a self-hosted [Firecrawl](https://github.com/firecrawl/firecrawl)
-  v2 instance, using only its markdown and rawHtml formats (no LLM needed).
-- Refreshing is manual: run the builder when you want fresh docs.
-- Ships the `liferay-expert` agent skill: it searches the library, cites it, and
-  (via `references/liferay-platform.md`) covers platform internals and upgrades.
+- **Fetching goes through a self-hosted [Firecrawl](https://github.com/firecrawl/firecrawl)**
+  v2 instance, using only its markdown and rawHtml formats (no LLM involved).
+- **One command builds everything** (`uv run liferay-context-builder`); refreshing
+  is manual.
+- **Ships the `liferay-expert` agent skill** with a small script (`scripts/docs.py`)
+  for status, ranked full-text search, and section-level reads of large pages.
 
 Python 3.10-3.13 · [MIT license](LICENSE) · fork of
 [mordonez/liferay-context-builder](https://github.com/mordonez/liferay-context-builder)
@@ -65,15 +69,20 @@ uv run liferay-context-builder
 
 ```mermaid
 flowchart LR
-  A[learn.liferay.com] --> B[Firecrawl /v2/crawl and /v2/batch/scrape]
+  A[learn.liferay.com] --> B[Firecrawl]
+  A2[liferay.dev/blogs] --> B
   B --> C[Markdown in ~/.liferay-docs/raw]
-  C --> D[reports/filtered: search_index.jsonl, summary.json, anomalies.jsonl]
+  C --> D[search_index.jsonl + search.db + summary.json + anomalies.jsonl]
   C --> E[liferay-expert skill]
   D --> E
-  E --> F[answers citing learn.liferay.com URLs]
+  E --> F[docs.py: status / search / outline / section]
+  F --> G[answers citing source URLs]
 ```
 
-**Official docs** (`liferay-context-builder`):
+`liferay-context-builder` runs three stages in order and then rebuilds the search
+indexes. Each stage also has its own command (see the Command Reference).
+
+### Stage 1: official docs (`liferay-context-builder --official-only`)
 
 1. One Firecrawl crawl job starts at `https://learn.liferay.com/w/dxp/index` and
    follows links:
@@ -84,46 +93,81 @@ flowchart LR
    returns the article body without navigation, banners or cookie dialogs.
 3. The URL prefix decides the capability folder; pure table-of-contents pages go
    to `raw/_navigation/`.
-4. Pages that failed or came back empty are re-scraped once in a batch job.
+4. Pages Firecrawl could not scrape are read from the crawl's `/errors` endpoint
+   (see Failure behaviour) and, with any page that came back empty, re-scraped
+   once in 100-URL batch jobs.
 5. Files from the previous run that were not rediscovered are checked directly:
-   still live → refreshed; HTTP 404/410 → moved to `raw/_removed/`.
-6. Reports and the search index are regenerated.
+   still live → refreshed; HTTP 404/410 → moved to `raw/_removed/`. If a
+   capability's page count drops below half of what is on disk (a likely
+   incomplete crawl), nothing is quarantined for it and its unseen pages are
+   refreshed directly instead.
+6. Reports and the search indexes are regenerated.
 
-**Community articles** (`liferay-context-builder-community`): pages through the
-server-rendered search listing (`/learn-search?resource-type=...`, 60 links per
-page), batch-scrapes each article as raw HTML, extracts title, tags and
-`.knowledge-article-content`, converts it with `markdownify`, and retries
-missed articles once.
+### Stage 2: community articles (`liferay-context-builder-community`)
 
-**Community blog posts** (`liferay-context-builder-blogs`): pages through
-`liferay.dev/blogs?delta=20&start=<page>` (newest first) until a page has
-nothing at or after `--since` (default 2022-01-01), then scrapes each post
-as raw HTML and keeps the article body. Listing pages are scraped one at a
-time, 2 s apart; the posts go through one `/v2/batch/scrape` job, and misses
-are retried once. Posts categorised `News` (release announcements, webinars, events)
-are skipped unless `--include-news` is given, and posts already on disk are
-skipped unless `--refresh` is given or the site's Atom feed (latest 20 posts)
-shows they were edited after they were fetched. Each post is filed under the
-capability its first mappable site category names (`AI`, `Cloud`, `CMS`,
-`Commerce`, `Customer Data`, `Frameworks`, `Integration`, `Low-Code`,
-`Security`, `Sites`); the rest, about 80%, go to `_uncategorized/`, and a
-re-run moves posts whose categories changed without refetching them. The site
-returns 403 for deep listing
-pages; that ends discovery early, keeps what was found, and exits 1.
+Pages through the server-rendered search listing
+(`/learn-search?resource-type=...`, 60 links per page; a failed listing page is
+retried once), batch-scrapes each article as raw HTML, extracts title, tags and
+`.knowledge-article-content`, and converts it with `markdownify`.
 
-**One command builds everything.** `liferay-context-builder` runs the official
-crawl, then the community KB articles, then the blog posts, and exits 1 if any
-stage reported a failure. A stage that fails does not skip the next one.
-`--official-only` stops after the official docs. The community and blog stages
-also have their own commands (see the Command Reference), and the flags `--max-depth`
-and `--max-pages` apply to the official stage only.
+- **Resumable.** Articles already on disk are skipped unless `--refresh` is given,
+  so a run that lost articles only refetches the missing ones.
+- **Retry rounds.** Failed articles are retried in up to three more rounds,
+  stopping early if a round recovers none.
+- **Capability mapping.** The article's `Capability` tag is matched against known
+  names (`CAPABILITY_TAG_MAP`); unmatched articles go to `_uncategorized/`. Known
+  names that contain commas ("DXP Self-Hosted Installation, Maintenance, and
+  Administration") are matched as whole values. Skipped articles are moved to the
+  folder their stored tag maps to today, without refetching.
 
-**Failure behaviour**
+### Stage 3: blog posts (`liferay-context-builder-blogs`)
+
+Pages through `liferay.dev/blogs?delta=20&start=<page>` (newest first) until a
+page has nothing at or after `--since` (default 2022-01-01), then batch-scrapes the
+posts as raw HTML and keeps the article body.
+
+- **Filtering.** Posts categorised `News` (release announcements, webinars, events)
+  are skipped unless `--include-news` is given (about 139 of 489 since 2022).
+- **Pacing and blocks.** Listing pages are scraped one at a time, 2 s apart. The site
+  returns 403 for deep listing pages; that ends discovery early, keeps what was
+  found, and exits 1.
+- **Capability folders.** A post is filed under the capability its first mappable
+  site category names (`AI`, `Cloud`, `CMS`, `Commerce`, `Customer Data`,
+  `Frameworks`, `Integration`, `Low-Code`, `Security`, `Sites`); the rest, about
+  80%, go to `_uncategorized/`. A re-run moves posts whose categories changed
+  without refetching them.
+- **Refresh.** Posts already on disk are skipped unless `--refresh` is given or the
+  site's Atom feed (latest 20 posts, matched by title and date) shows they were
+  edited after they were fetched. An unreadable feed only warns.
+
+### One command builds everything
+
+`liferay-context-builder` runs the official crawl, then the community articles,
+then the blog posts, and exits 1 if any stage reported a failure. A stage that
+fails does not skip the next one (except that a Firecrawl outage stops the rest).
+`--official-only` stops after the official docs. `--max-depth` and `--max-pages`
+apply to the official stage only. `--reindex-only` rebuilds the search indexes from
+the files on disk without crawling.
+
+### Failure behaviour
 
 - Firecrawl unreachable → one-line error naming `FIRECRAWL_API_URL`, exit 1.
-- A Firecrawl job with no status for 3 polls, or no progress for 10 minutes →
-  crawl error, no pages are quarantined, exit 1.
-- Any page still failing after the retry is listed and the run exits 1; pages
+- **Silent crawl drops are recovered.** Firecrawl leaves pages it could not scrape
+  out of a crawl's data and lists them only at `GET /v2/crawl/{id}/errors`. The
+  client reads that endpoint and yields those pages as failed, so the retry pass
+  sees them instead of mistaking them for pages the crawl never found
+  (external-link and off-host entries are ignored).
+- **Partial results survive.** A crawl or batch job that fails, is cancelled or
+  stalls yields whatever it scraped before raising.
+- **Transient poll problems are tolerated.** A non-JSON error body (a proxy 502) or a
+  read timeout counts as a failed call, and a job status missing for 6 polls, or no
+  progress for 10 minutes, becomes a crawl error (no pages are quarantined, exit 1).
+- **Batches are chunked.** Batch scrapes are split into jobs of 100 URLs run one after
+  another (`BATCH_CHUNK_SIZE` in `fetcher.py`). A self-hosted Firecrawl fails the
+  jobs of a very large batch in bulk (see Design notes): one batch of 3,603 kept 42%
+  of its pages, one of 1,327 kept 99%. A batch job that dies is reported on stderr
+  and its URLs are retried instead of stopping the run.
+- Any page still failing after the retries is listed and the run exits 1; pages
   already written stay valid.
 
 ## Command Reference
@@ -136,8 +180,9 @@ uv run liferay-context-builder --official-only --max-pages 30   # quick smoke ru
 uv run liferay-context-builder --official-only --max-depth 12 --max-pages 3000
 
 # the two extra stages also run on their own:
-uv run liferay-context-builder-community                              # How-To + Troubleshooting
+uv run liferay-context-builder-community                              # How-To + Troubleshooting (resumes)
 uv run liferay-context-builder-community --resource-type howto        # one type
+uv run liferay-context-builder-community --refresh                    # refetch articles already on disk
 uv run liferay-context-builder-community --resource-type troubleshooting --limit 100
 
 uv run liferay-context-builder-blogs                                  # posts since 2022-01-01, no News
@@ -146,12 +191,14 @@ uv run liferay-context-builder-blogs --include-news --refresh         # everythi
 
 uv run liferay-context-builder-doctor                                 # status of docs + skill
 uv run liferay-context-builder-doctor --project-dir /path/to/project
+
+uv run python evals/search_eval.py                                    # score search quality on the real library
 ```
 
 Example output of a smoke run:
 
 ```text
-$ uv run liferay-context-builder --max-pages 30
+$ uv run liferay-context-builder --official-only --max-pages 30
 Starting crawl (~20-25 min usually) -- progress every 50 pages...
 
 Total discovered under /w/dxp: 30
@@ -177,11 +224,11 @@ By capability:
   sites: 1
 ```
 
-Timings: official docs ~20-25 minutes on a warm Firecrawl stack (the first crawl
-after a cold `docker compose up` is noticeably slower); community ~1 hour;
-blogs a few minutes for a first run, seconds for a re-run that only
-finds posts already on disk.
-The skill flags docs older than about 7 days, so a weekly refresh is plenty.
+Timings on a warm Firecrawl stack: official docs ~20-25 minutes (the first crawl
+after a cold `docker compose up` is slower); community ~1 hour for a full first run,
+much less when resuming; blogs a few minutes for a first run and seconds when every
+post is already on disk. The skill flags official docs older than about 7 days, so a
+weekly refresh is plenty.
 
 ## The Library
 
@@ -196,7 +243,8 @@ The skill flags docs older than about 7 days, so a weekly refresh is plenty.
   reports/filtered/
     search.db                                full-text (SQLite FTS5) index of every page body
     search_index.jsonl                       one JSON line per page
-    summary.json                             counts of the last run
+    summary.json                             counts of the last official run
+    {source}_summary.json                    counts of the last community / blog run
     anomalies.jsonl                          short/odd pages worth a check
     {capability}_urls.txt                    in-scope URLs per capability
     removed_log.jsonl                        quarantine log
@@ -260,58 +308,117 @@ content_hash: "sha256:529a66a0..."
 # Cookie Consent Management
 ```
 
-The search index has one JSON line per page, official docs first, then community
-How-To, Troubleshooting and blogs. Besides `title`, `url`, `source_type`,
-`capability`, `path`, `headings` and `fetched_at`, each line has a one-line
-`summary`, and community pages add `published_at`, `author`, `tags`,
-`categories` and `applicable_versions` when the page has them, so an agent can
-judge relevance and recency from a grep hit without opening the file. Any run
-regenerates it.
+### The two indexes
 
-Search index line (`reports/filtered/search_index.jsonl`, shortened):
+Both are regenerated at the end of every stage (and by `--reindex-only`).
+
+**`search_index.jsonl`** has one JSON line per page, official docs first, then
+community How-To, Troubleshooting and blogs. Besides `title`, `url`, `source_type`,
+`capability`, `path`, `headings` and `fetched_at`, each line has a one-line
+`summary`, and community pages add `published_at`, `author`, `tags`, `categories` and
+`applicable_versions` when the page has them, so an agent can judge relevance and
+recency from a hit without opening the file. Official pages open with an underlined
+title, which the index treats as the page's first heading; summaries skip a line
+that repeats the title, strip emphasis markers and link syntax, and prefer a
+paragraph that starts and ends like a sentence.
 
 ```json
-{"title": "Cloud Native Experience Cne Kubernetes Ready", "url": "https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/cloud-native-experience/cne-kubernetes-ready", "source_type": "official", "capability": "self-hosted", "path": "raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md", "headings": [], "fetched_at": "2026-09-23T15:58:04Z"}
+{"title": "Cloud Native Experience Kubernetes Ready", "url": "https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/cloud-native-experience/cne-kubernetes-ready", "source_type": "official", "capability": "self-hosted", "path": "raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md", "headings": ["Cloud Native Experience Kubernetes Ready"], "fetched_at": "2026-09-23T15:58:04Z", "summary": "The Kubernetes Ready path of the Cloud Native Experience (CNE) deploys Liferay DXP ..."}
 ```
 
-Searching it by hand:
+**`search.db`** is an SQLite FTS5 table (`porter unicode61` tokenizer) over `title`,
+`headings`, `tags` and the full page `body` (link targets stripped, so URLs are not
+indexed as text), with `path`, `url`, `source_type`, `capability`, `published_at`,
+`summary` and `fetched_at` stored alongside so one query returns everything a hit
+shows. It is written after the JSONL and replaced atomically. A Python whose SQLite
+has no FTS5 simply skips it, and search falls back to the JSONL. At about 4,800
+pages it is ~32 MB and builds in about a second.
+
+## Searching
+
+Agents search with the skill's script (standard library only):
+
+```bash
+python3 skills/liferay-expert/scripts/docs.py status
+python3 skills/liferay-expert/scripts/docs.py search "client extension" oauth --source blog --since 2024
+python3 skills/liferay-expert/scripts/docs.py search company.security.auth.type
+python3 skills/liferay-expert/scripts/docs.py outline raw/self-hosted/some-page.md
+python3 skills/liferay-expert/scripts/docs.py section raw/self-hosted/some-page.md "Some heading"
+```
+
+- **`search`** is full-text over titles, headings, tags and page bodies, stemmed
+  (`extensions` matches `extension`) and BM25-ranked. Column weights are title 40,
+  headings 5, tags 3, body 1, plus a small authority tie-break (official 0,
+  how-to/troubleshooting 1, blog 2), then newest first. Every term must match;
+  quote a phrase to match it exactly, and pass identifiers whole. Each hit shows
+  source, capability, date, `path`, and the passage that matched between « »; the
+  output is capped (default 15 hits, `--limit`) and says how many more matched.
+  Filters: `--source official|howto|troubleshooting|blog`, `--capability <folder>`,
+  `--since YYYY[-MM-DD]` (official docs are undated and never dropped by it). If no
+  page matches every term, it shows the closest partial matches and says so.
+- **Fallback.** If `search.db` is missing, older than the Markdown files (a build is
+  running) or unusable, `search` matches titles, headings, tags and summaries from
+  the JSONL and prints a note on stderr. Terms that live only in a page body then
+  need `grep -ril "<term>" raw/`.
+- **`outline` / `section`** solve the large-page problem: over a hundred pages exceed
+  20 KB and a few exceed 100 KB (the upgrade breaking-changes pages reach 260 KB). `outline`
+  prints size and headings with line numbers (including the underlined title and
+  skipping code fences and frontmatter); `section` prints one section up to the next
+  heading of its level, capped at 200 lines with a note on where to continue. Pages
+  with no headings (the breaking-changes lists are per-class entries) are read with
+  `grep -n` and a ranged Read.
+- **`status`** prints the docs dir, page counts per source, fetch dates and a STALE
+  flag for official docs older than 7 days, and whether full-text search is ready.
+
+By hand, without the script:
 
 ```bash
 cd ~/.liferay-docs
-grep -i "synonym" reports/filtered/search_index.jsonl | head        # shortlist by title/headings/summary
+grep -i "synonym" reports/filtered/search_index.jsonl | head -30       # cap it: a hit is ~1 KB
 grep -i "mcp" reports/filtered/search_index.jsonl | grep community-blog \
-  | jq -r '[.published_at,.title,.path]|@tsv'                        # compact blog hits with dates
-grep -ril "client extension" raw/development/ | head                # full-text in one capability
-grep -ril "ClassNotFoundException" raw/community-troubleshooting/   # error text -> troubleshooting
+  | jq -r '[.published_at,.title,.path]|@tsv'                          # compact blog hits with dates
+grep -ril "ClassNotFoundException" raw/community-troubleshooting/     # error text -> troubleshooting
 jq '{discovered_total, fetch_failed_count}' reports/filtered/summary.json
 ```
 
+### Measuring search quality
+
+`evals/search_eval.py` scores search against your real library: 30 questions, each
+with the page titles an acceptable hit must contain, reported as mean reciprocal
+rank and top-1/top-3 counts. It is not part of the test suite because it needs a
+built library. On the current library it scores MRR 0.951, top-1 28/30, top-3 29/30
+(the title weight was tuned from 10 to 40 with it: 25 → 28 top-1). Run it after
+changing the index, the ranking weights in `scripts/docs.py`, or after a big
+refetch, and add a case when a real question was answered badly. The 30 questions
+are hand-written, so treat the absolute score as optimistic and use it to compare
+changes.
+
 ## The Skill
 
-`skills/liferay-expert/SKILL.md` teaches an agent to find the library
-(`$LIFERAY_DOCS_DIR`, else `~/.liferay-docs`), shortlist via the search index,
-read the matching Markdown, and cite the frontmatter `url`. Community articles
-are labelled as community content and official docs win when both cover a
-topic. Blog posts are indexed in `search_index.jsonl` (`source_type:
-community-blog`) but the skill has no blog-specific routing or citation rule. A Reference-files table routes platform questions to
-`references/liferay-platform.md` (OSGi/DS, Service Builder, REST Builder,
-Client Extensions, extension-point choice, and the version-upgrade /
-breaking-changes workflow), so the docs lookup stays focused. The skill also ships
-`scripts/docs.py` (standard library only), which the agent runs for bounded
-lookups: `status` (is the library there and fresh), `search` (full-text over
-titles, headings, tags and page bodies, stemmed and BM25-ranked, filtered by
-source, capability or date, each hit with the passage that matched), and
-`outline` / `section` (read one part of a large page). `search` reads
-`reports/filtered/search.db`, an SQLite FTS5 index the builder regenerates at
-the end of every stage; if it is missing or older than the Markdown files,
-search falls back to the title/summary index and says so. Without `python3` the
-skill falls back to plain `grep`. There are no embeddings: the agent rewrites
-its own queries when one misses. The skill never
-starts a build itself; when docs are missing or older than ~7 days it tells you
-which command to run.
+`skills/liferay-expert/SKILL.md` teaches an agent to:
+
+1. find the library (`$LIFERAY_DOCS_DIR`, else `~/.liferay-docs`) and run
+   `docs.py status`;
+2. search with `docs.py search`, judging hits by summary and date before opening
+   anything;
+3. read the match with `outline` / `section` for large pages;
+4. answer and cite the frontmatter `url`;
+5. fall back to community How-To / Troubleshooting (`--source howto|troubleshooting`)
+   and then blog posts (`--source blog`, newest first) when the official docs are
+   empty or thin.
+
+Community content is always labelled as community content (blog posts with author
+and date), and official docs win when sources disagree. A Community table in the
+skill describes the three community folders. A Reference-files table routes
+platform questions to `references/liferay-platform.md` (OSGi/DS, Service Builder,
+REST Builder, Client Extensions, extension-point choice, and the version-upgrade /
+breaking-changes workflow); an optional host-local overlay
+(`references/liferay-platform-local.md`) is used only if it exists. Without
+`python3` the skill falls back to plain `grep`. The skill never starts a build
+itself; when docs are missing or stale it tells you which command to run.
 
 Install it into a Claude Code project (copy the whole skill directory, so
-`references/` comes with it):
+`references/` and `scripts/` come with it):
 
 ```bash
 npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code
@@ -342,6 +449,7 @@ Official docs: OK (25 markdown files, 30 discovered in last report)
 Community docs: 10 markdown files
 Official freshness: 2026-09-23 .. 2026-09-23
 Search index: 35 entries
+Full-text index: 35 pages
 Anomalies report: 23 entries
 Claude Code skill: MISSING (/path/to/project/.claude/skills/liferay-expert/SKILL.md)
 
@@ -350,8 +458,8 @@ Next steps:
 ```
 
 It reports the active docs directory, official and community file counts, the
-freshness window, index and anomaly counts, and whether the skill is installed
-in the project. It never builds or installs anything.
+freshness window, index, full-text index and anomaly counts, and whether the skill is
+installed in the project. It never builds or installs anything.
 
 ## Troubleshooting
 
@@ -363,17 +471,40 @@ running instance.
 progressing (worker crash, stack restart). Check `docker compose logs api` in
 the Firecrawl checkout, then rerun.
 
-**Blogs run reports `listing page N: ...` under crawl errors** — liferay.dev
-blocked or emptied a listing page (403 on deep pages, or a layout change).
-Posts found before that page were still fetched; rerun later or lower the
-range with `--since`.
+**A stage lost most of its pages** (for example "Written: 1520 / Fetch failures: 2084")
+— this is usually Firecrawl, not the site. Check its queue for a bulk failure:
 
-**Run ends with fetch failures** — the listed pages failed twice. Rerun later;
-everything already written stays valid and nothing is quarantined on a failed
+```bash
+docker exec firecrawl-nuq-postgres-1 psql -U postgres -d postgres -c \
+  "select group_id, status, count(*), max(stalls) from nuq.queue_scrape
+   where created_at > now() - interval '4 hours' and group_id is not null
+   group by 1,2 order by min(created_at)"
+```
+
+Many `failed` jobs with `stalls = 10` and identical finish times mean the worker pool
+was overwhelmed. Rerun the stage: the community command resumes and only fetches what
+is missing, and batches are already split into jobs of 100 URLs. Also compare a direct
+`curl -A 'Mozilla/5.0' <url>` with a Firecrawl scrape of the same URL to rule out the
+site.
+
+**A few articles fail with "no article container"** — Firecrawl occasionally renders a
+page before its content is in the DOM. It is transient (the retry rounds pick these
+up); the same page succeeded 6 of 6 times when retried.
+
+**Blogs run reports `listing page N: ...` under crawl errors** — liferay.dev blocked or
+emptied a listing page (403 on deep pages, or a layout change). Posts found before
+that page were still fetched; rerun later or lower the range with `--since`.
+
+**Run ends with fetch failures** — the listed pages failed after the retries. Rerun
+later; everything already written stays valid and nothing is quarantined on a failed
 crawl.
 
 **Agent says docs are missing** — check `echo "$LIFERAY_DOCS_DIR"`; the builder
 and the skill must use the same directory. Run the doctor.
+
+**`docs.py search` prints "full-text search unavailable"** — `search.db` is missing or
+older than the Markdown files (a build is running or was interrupted). Run
+`uv run liferay-context-builder --reindex-only`.
 
 **Docs are stale** — rerun `uv run liferay-context-builder`.
 
@@ -381,14 +512,72 @@ and the skill must use the same directory. Run the doctor.
 
 ```bash
 uv sync --group dev
-uv run --group dev pytest -q
-uv run --group dev ruff check src tests
+uv run python -m pytest -q
+uv run ruff check src tests skills evals
 uv build
 ```
 
 Tests mock the Firecrawl API; no network access is needed. CI runs lint, tests
 and a package build on Python 3.10-3.13. Design decisions are in
-[`docs/adr/`](docs/adr/).
+[`docs/adr/`](docs/adr/), and open work is in [`TODO.md`](TODO.md).
+
+## Design notes
+
+Why things are the way they are, with the evidence behind them.
+
+- **Firecrawl fails big batches in bulk.** Firecrawl's queue table showed a
+  3,603-URL batch with 822 jobs completed and 2,781 failed, all finishing exactly
+  86.8 s after creation and 2,780 of them with `stalls = 10`: the stall reaper gave
+  up on jobs that were claimed but never worked (`MAX_CONCURRENT_JOBS=5`). A
+  1,327-URL batch kept 99%. With 100-URL jobs, 291 of 300 previously missing articles
+  came through (queue: one job failure), and the rest were the transient
+  "no article container" race. The site itself was never blocking: direct requests
+  returned 200 in under a second. The exact mechanism is inferred from the queue
+  table.
+- **The official crawl had the same drops, silently.** Failed crawl pages are not in
+  a crawl's data, so they looked like pages the crawl never found: 301 direct
+  refreshes in one run, 650 in the next (596 recovered, 56 failed). Reading the
+  `/errors` endpoint, keeping partial results and refreshing unseen pages of a
+  guarded capability address the recovery side. A crawl job cannot be split into
+  chunks, so the cause is not removed (see `TODO.md`).
+- **SQLite FTS5 instead of embeddings or an external engine.** It ships in the
+  standard library, needs nothing installed, gives BM25 ranking, stemming, phrase
+  search and passage snippets, and builds in about a second. A plain scan of the
+  library takes ~50 ms, so speed was never the reason; relevance was (identifiers and
+  error strings that appear only in page bodies were unfindable through the
+  title/summary index). Embeddings would add a model dependency for a problem the
+  agent already handles by rewriting its own queries.
+- **A script, not just grep.** A raw grep of a common term returned ~200 KB of index
+  lines, and the skill told agents to read pages in full. `docs.py` bounds output,
+  ranks, and reads by section. It lives inside the skill directory, so copying the
+  skill copies it, and grep remains the fallback.
+- **Blogs are their own source, not a capability.** `content-management-system`
+  covers the product's Blogs feature; liferay.dev posts are about everything. A
+  separate `source_type` keeps their lower authority visible, and capability folders
+  come from the site's own categories, with unmapped ones left in `_uncategorized/`.
+- **Blogs use batch scraping, listings stay serial.** The first version fetched every
+  post with its own scrape call plus a 10 s sleep, based on a `robots.txt`
+  crawl-delay that names other bots. Posts are one flat URL list, so they now go
+  through batch jobs; only the listing pages, which decide whether to fetch the next,
+  are paced (2 s).
+- **The skill in the repo is copyable into a hub.** `SKILL.md` refers to a host-local
+  overlay only "if the file exists", so the repo copy and a hub copy differ only by
+  that untracked file.
+
+## History of this round of changes
+
+- Crawl failure handling: `/errors` endpoint, partial results, tolerant polling,
+  guarded-capability refresh, chunked batches.
+- New blog source with feed-based refresh and capability folders.
+- One command for all three sources, `--official-only`, `--reindex-only`.
+- Community command: resume, `--refresh`, retry rounds, listing retry, comma-aware tag
+  mapping.
+- Search index: blog source, authority ordering, summaries, filter fields, underlined
+  titles, cleaner headings.
+- Full-text search (`search.db`) and the `docs.py` script; skill rewritten around it,
+  with a Community table and conditional host-local overlay.
+- `evals/search_eval.py`, and ranking weights tuned with it.
+- Doctor reports the full-text index; the test suite now has 139 tests.
 
 ## License
 
