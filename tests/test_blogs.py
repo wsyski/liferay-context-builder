@@ -159,16 +159,37 @@ def test_fetch_page_returns_html_after_transient_miss(monkeypatch):
     assert blogs.fetch_page("https://liferay.dev/b/a") == "<html>ok</html>"
 
 
+def fake_batch(html_by_slug=None, calls=None):
+    """batch_scrape stand-in: success with post_html() unless html_by_slug maps the slug to None (miss)."""
+    html_by_slug = html_by_slug or {}
+
+    def batch(urls, options):
+        if calls is not None:
+            calls.append(list(urls))
+        for url in urls:
+            slug = url.rsplit("/", 1)[1]
+            html = html_by_slug.get(slug, post_html())
+            yield fetcher.Page(url, html is not None, None, html)
+
+    return batch
+
+
+def stub_discovery(monkeypatch, entries):
+    monkeypatch.setattr(blogs, "discover_entries", lambda fetch, since, stats, limit=None: entries)
+
+
 def test_run_skips_news_and_existing_and_writes_post(monkeypatch, tmp_path):
     configure_blog_dirs(monkeypatch, tmp_path)
     existing = entry("have")
     blogs.post_path(existing).parent.mkdir(parents=True)
     blogs.post_path(existing).write_text("---\n---\nold", encoding="utf-8")
     entries = [entry("news", categories=["News"]), existing, entry("fresh", categories=["Featured"])]
-    monkeypatch.setattr(blogs, "discover_entries", lambda fetch, since, stats, limit=None: entries)
+    stub_discovery(monkeypatch, entries)
+    calls = []
 
-    stats = blogs.run(lambda url: post_html(), date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(None, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
 
+    assert calls == [["https://liferay.dev/b/fresh"]]
     assert (stats.skipped_news, stats.skipped_existing) == (1, 1)
     assert [status for _, status in stats.outcomes] == ["new"]
     text = blogs.post_path(entries[2]).read_text(encoding="utf-8")
@@ -178,43 +199,93 @@ def test_run_skips_news_and_existing_and_writes_post(monkeypatch, tmp_path):
     assert "# Title fresh" in text
 
 
+def test_run_makes_no_batch_call_when_nothing_to_fetch(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    stub_discovery(monkeypatch, [entry("news", categories=["News"])])
+    calls = []
+
+    stats = blogs.run(None, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
+
+    assert calls == []
+    assert stats.fetch_failed == []
+
+
 def test_run_refresh_refetches_existing_post(monkeypatch, tmp_path):
     configure_blog_dirs(monkeypatch, tmp_path)
-    existing = entry("have")
-    monkeypatch.setattr(blogs, "discover_entries", lambda fetch, since, stats, limit=None: [existing])
-    fetch = lambda url: post_html()  # noqa: E731
+    stub_discovery(monkeypatch, [entry("have")])
+    batch = fake_batch()
 
-    blogs.run(fetch, date(2022, 1, 1), include_news=False, refresh=False)
-    stats = blogs.run(fetch, date(2022, 1, 1), include_news=False, refresh=True)
+    blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=True)
 
     assert [status for _, status in stats.outcomes] == ["unchanged"]
 
 
-def test_run_records_failed_post_and_continues(monkeypatch, tmp_path):
+def test_run_retries_a_missed_post_once(monkeypatch, tmp_path):
     configure_blog_dirs(monkeypatch, tmp_path)
-    entries = [entry("bad"), entry("good")]
-    monkeypatch.setattr(blogs, "discover_entries", lambda fetch, since, stats, limit=None: entries)
+    stub_discovery(monkeypatch, [entry("flaky"), entry("good")])
+    calls = []
+    results = {"flaky": iter([None, post_html()])}
 
-    def fetch(url):
-        if url.endswith("/bad"):
-            raise blogs.FetchError("boom")
-        return post_html()
+    def batch(urls, options):
+        calls.append(list(urls))
+        for url in urls:
+            slug = url.rsplit("/", 1)[1]
+            html = next(results[slug]) if slug in results else post_html()
+            yield fetcher.Page(url, html is not None, None, html)
 
-    stats = blogs.run(fetch, date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
+
+    assert calls == [["https://liferay.dev/b/flaky", "https://liferay.dev/b/good"], ["https://liferay.dev/b/flaky"]]
+    assert stats.fetch_failed == []
+    assert len(stats.outcomes) == 2
+
+
+def test_run_reports_post_that_fails_twice_and_keeps_others(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    stub_discovery(monkeypatch, [entry("bad"), entry("good")])
+
+    stats = blogs.run(None, fake_batch({"bad": None}), date(2022, 1, 1), include_news=False, refresh=False)
 
     assert stats.fetch_failed == ["https://liferay.dev/b/bad"]
     assert len(stats.outcomes) == 1
 
 
+def test_run_treats_unparseable_post_as_failed(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    stub_discovery(monkeypatch, [entry("empty")])
+
+    stats = blogs.run(None, fake_batch({"empty": "<html><body>no article</body></html>"}), date(2022, 1, 1),
+                      include_news=False, refresh=False)
+
+    assert stats.fetch_failed == ["https://liferay.dev/b/empty"]
+
+
+def test_run_records_batch_crash_and_marks_unreturned_posts_failed(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    stub_discovery(monkeypatch, [entry("a"), entry("b")])
+
+    def batch(urls, options):
+        yield fetcher.Page(urls[0], True, None, post_html())
+        raise RuntimeError("batch job b1 ended failed: boom")
+
+    stats = blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
+
+    assert stats.crawl_errors == ["post batch: batch job b1 ended failed: boom"]
+    assert stats.fetch_failed == ["https://liferay.dev/b/b"]
+    assert len(stats.outcomes) == 1
+
+
 def test_run_propagates_firecrawl_unavailable(monkeypatch, tmp_path):
     configure_blog_dirs(monkeypatch, tmp_path)
-    monkeypatch.setattr(blogs, "discover_entries", lambda fetch, since, stats, limit=None: [entry("a")])
+    stub_discovery(monkeypatch, [entry("a")])
 
-    def fetch(url):
+    def batch(urls, options):
         raise fetcher.FirecrawlUnavailable("down")
+        yield  # pragma: no cover
 
     with pytest.raises(fetcher.FirecrawlUnavailable):
-        blogs.run(fetch, date(2022, 1, 1), include_news=False, refresh=False)
+        blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
 
 
 def test_main_exits_nonzero_when_run_reports_failure(monkeypatch, tmp_path):

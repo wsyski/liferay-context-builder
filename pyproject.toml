@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 liferay-context-builder = "liferay_docs_scraper.pipeline:main"
 liferay-context-builder-community = "liferay_docs_scraper.community:main"
+liferay-context-builder-blogs = "liferay_docs_scraper.blogs:main"
 liferay-context-builder-doctor = "liferay_docs_scraper.doctor:main"
 
 [build-system]

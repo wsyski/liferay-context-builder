@@ -8,10 +8,12 @@ raw/community-blog/_uncategorized/ with source_type, published_at, author
 and categories in the frontmatter, so the liferay-expert skill can cite them
 with a date and a caveat.
 
-  - Fetched one URL at a time through Firecrawl's /v2/scrape, not a batch or
-    crawl job: robots.txt sets a 10 s Crawl-delay for named bots and the
-    site answers deep listing pages with 403, so pacing and failure
-    handling sit in this module. Listing and posts are server-rendered.
+  - Listing pages are fetched one at a time through Firecrawl's /v2/scrape,
+    2 s apart: each page decides whether the next is needed, and the site
+    answers deep listing pages with 403, so pacing and failure handling sit
+    in this module. The posts themselves are one flat URL list, so they go
+    through a single /v2/batch/scrape job, with one retry pass for misses.
+    Listing and posts are server-rendered.
   - Discovery: /blogs?delta=20&start=<page>, newest first. Paging stops at
     the first page whose entries are all older than --since (default
     2022-01-01), so old pages are never requested. A 403 or empty page ends
@@ -20,7 +22,7 @@ with a date and a caveat.
   - Filtering: posts categorised "News" (release announcements, webinars,
     event recaps) are skipped unless --include-news is given.
   - Re-runs: posts already on disk are skipped unless --refresh is given,
-    since a full run is about 10 s per post.
+    since a full run is a few hundred posts.
 
 Usage:
     uv run liferay-context-builder-blogs
@@ -60,7 +62,7 @@ BUCKET = "_uncategorized"
 NEWS_CATEGORY = "News"
 DEFAULT_SINCE = date(2022, 1, 1)
 
-REQUEST_DELAY_SECONDS = 10  # robots.txt Crawl-delay for named bots
+REQUEST_DELAY_SECONDS = 2  # serial polite pacing; robots.txt's Crawl-delay: 10 names other bots, not "*"
 RETRY_DELAY_SECONDS = 60
 # both the listing and the posts are server-rendered -- no JS wait needed
 SCRAPE_OPTIONS = {"formats": ["rawHtml"], "onlyMainContent": False, "waitFor": 0, "maxAge": 0, "timeout": 60000}
@@ -98,7 +100,7 @@ class RunStats:
 
 def fetch_page(url: str) -> str:
     """Scrape url through Firecrawl with one delayed retry, then sleep
-    REQUEST_DELAY_SECONDS so every caller respects the site's crawl delay.
+    REQUEST_DELAY_SECONDS so requests stay paced.
     FirecrawlUnavailable propagates: no point retrying a dead stack."""
     for attempt in (1, 2):
         page = fetcher.scrape(url, SCRAPE_OPTIONS)
@@ -203,10 +205,10 @@ def read_existing_hash(path: Path) -> str | None:
     return None
 
 
-def fetch_and_write(entry: ListingEntry, fetch, stats: RunStats) -> bool:
+def write_post(entry: ListingEntry, html: str, stats: RunStats) -> bool:
     # One bad post must not kill a run that fetches hundreds -- record it and move on.
     try:
-        markdown = extract_post(fetch(entry.url))
+        markdown = extract_post(html)
         if markdown is None:
             return False
         out_path = post_path(entry)
@@ -226,16 +228,37 @@ def fetch_and_write(entry: ListingEntry, fetch, stats: RunStats) -> bool:
         status = "new" if not existed_before else ("unchanged" if old_hash == new_hash else "updated")
         stats.outcomes.append((entry.url, status))
         return True
-    except fetcher.FirecrawlUnavailable:
-        raise
-    except FetchError as exc:
-        print(f"  FAILED {exc}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - any per-post failure is non-fatal here
         print(f"  ERROR processing {entry.url}: {exc}", file=sys.stderr)
-    return False
+        return False
 
 
-def run(fetch, since: date, include_news: bool, refresh: bool, limit: int | None = None) -> RunStats:
+def scrape_posts(entries: list[ListingEntry], batch_scrape, stats: RunStats) -> list[ListingEntry]:
+    """Batch-scrape and write entries; return the ones that failed. A job
+    that dies part-way is recorded in stats.crawl_errors and every entry it
+    never returned counts as failed."""
+    by_key = {fetcher.match_key(e.url): e for e in entries}
+    handled: set[str] = set()
+    failed: list[ListingEntry] = []
+    try:
+        for page in batch_scrape([e.url for e in entries], SCRAPE_OPTIONS):
+            entry = by_key.get(fetcher.match_key(page.url))
+            if entry is None or entry.url in handled:
+                continue
+            handled.add(entry.url)
+            print(f"  [{len(handled)}/{len(entries)}] {entry.url}", flush=True)
+            if not (page.success and write_post(entry, page.html, stats)):
+                failed.append(entry)
+    except fetcher.FirecrawlUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - keep what the job returned before it died
+        stats.crawl_errors.append(f"post batch: {exc}")
+        print(f"\nERROR: post batch interrupted: {exc}", file=sys.stderr)
+        failed.extend(e for e in entries if e.url not in handled)
+    return failed
+
+
+def run(fetch, batch_scrape, since: date, include_news: bool, refresh: bool, limit: int | None = None) -> RunStats:
     stats = RunStats()
     print(f"Discovering posts since {since.isoformat()}...", flush=True)
     entries = discover_entries(fetch, since, stats, limit=limit)
@@ -251,11 +274,11 @@ def run(fetch, since: date, include_news: bool, refresh: bool, limit: int | None
         else:
             todo.append(entry)
 
-    for done, entry in enumerate(todo, start=1):
-        if done % 25 == 0:
-            print(f"  ...{done}/{len(todo)}", flush=True)
-        if not fetch_and_write(entry, fetch, stats):
-            stats.fetch_failed.append(entry.url)
+    failed = scrape_posts(todo, batch_scrape, stats) if todo else []
+    if failed and not stats.crawl_errors:
+        print(f"  retrying {len(failed)} posts once...", flush=True)
+        failed = scrape_posts(failed, batch_scrape, stats)
+    stats.fetch_failed = [e.url for e in failed]
     return stats
 
 
@@ -311,7 +334,7 @@ def main() -> None:
 
     ensure_anomalies_report(FILTERED_DIR)
     try:
-        stats = run(fetch_page, args.since, args.include_news, args.refresh, limit=args.limit)
+        stats = run(fetch_page, fetcher.batch_scrape, args.since, args.include_news, args.refresh, limit=args.limit)
     except fetcher.FirecrawlUnavailable as exc:
         print(f"ERROR: {exc}\n  Set FIRECRAWL_API_URL or start the stack: "
               "cd /path/to/firecrawl && docker compose up -d", file=sys.stderr)

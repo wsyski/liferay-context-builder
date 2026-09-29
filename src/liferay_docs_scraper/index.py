@@ -14,8 +14,18 @@ SEARCH_INDEX_NAME = "search_index.jsonl"
 ANOMALIES_NAME = "anomalies.jsonl"
 
 OFFICIAL_SOURCE_TYPE = "official"
-COMMUNITY_SOURCE_TYPES = ("community-howto", "community-troubleshooting")
+COMMUNITY_SOURCE_TYPES = ("community-howto", "community-troubleshooting", "community-blog")
+# Authority order: an agent reading the index top-down meets official docs first.
+SOURCE_RANK = {OFFICIAL_SOURCE_TYPE: 0, **{t: i for i, t in enumerate(COMMUNITY_SOURCE_TYPES, start=1)}}
+# Frontmatter fields worth carrying into the index so an agent can filter by
+# date, tag or version straight from a grep hit, without opening the file.
+INDEX_EXTRA_FIELDS = (
+    "published_at", "author", "categories", "tags",
+    "applicable_versions", "feature", "deployment_approach", "resource_type",
+)
+SUMMARY_CHARS = 200
 
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
 ANOMALY_ERROR_MARKERS = (
@@ -58,7 +68,7 @@ def parse_frontmatter(markdown: str) -> tuple[dict[str, str], str]:
 def extract_headings(body: str, limit: int = 12) -> list[str]:
     headings: list[str] = []
     for match in HEADING_RE.finditer(body):
-        text = match.group(2).strip()
+        text = MARKDOWN_LINK_RE.sub(r"\1", match.group(2)).strip()
         if text:
             headings.append(text)
         if len(headings) >= limit:
@@ -71,6 +81,16 @@ def title_from_body(body: str, fallback: str) -> str:
     if headings:
         return headings[0]
     return fallback.replace("-", " ").strip().title() or fallback
+
+
+def summarize(body: str, limit: int = SUMMARY_CHARS) -> str:
+    """First plain prose line of the body, so a grep hit says what the page is about."""
+    for line in body.splitlines():
+        text = MARKDOWN_LINK_RE.sub(r"\1", line.strip())
+        if len(text) < 40 or text[0] in "#[|>-*=`!" or text.startswith("---"):
+            continue
+        return text if len(text) <= limit else text[:limit].rstrip() + "…"
+    return ""
 
 
 def snapshot(body: str) -> ContentSnapshot:
@@ -171,7 +191,7 @@ def build_search_index(raw_dir: Path, reports_dir: Path) -> int:
 
             capability = frontmatter.get("capability") or directory.name
             headings = extract_headings(body)
-            entries.append({
+            entry = {
                 "title": title_from_body(body, path.stem),
                 "url": frontmatter.get("url", ""),
                 "source_type": frontmatter.get("source_type", source_type),
@@ -179,9 +199,14 @@ def build_search_index(raw_dir: Path, reports_dir: Path) -> int:
                 "path": str(path.relative_to(raw_dir.parent)),
                 "headings": headings,
                 "fetched_at": frontmatter.get("fetched_at", ""),
-            })
+            }
+            entry.update({key: frontmatter[key] for key in INDEX_EXTRA_FIELDS if frontmatter.get(key)})
+            entry["summary"] = summarize(body)
+            entries.append(entry)
 
-    entries.sort(key=lambda item: (item["source_type"] != OFFICIAL_SOURCE_TYPE, item["capability"], item["title"]))
+    entries.sort(key=lambda item: (
+        SOURCE_RANK.get(item["source_type"], len(SOURCE_RANK)), item["capability"], item["title"],
+    ))
     write_jsonl(reports_dir / SEARCH_INDEX_NAME, entries)
     return len(entries)
 
