@@ -5,7 +5,8 @@ Builds a local, cited copy of the Liferay DXP documentation from
 Liferay questions.
 
 - Official docs (`learn.liferay.com/w/dxp/*`, ~2,000 pages) and, optionally,
-  community How-To and Troubleshooting articles (`/kb-article/*`, ~4,800).
+  community How-To and Troubleshooting articles (`/kb-article/*`, ~4,800) and
+  recent community blog posts (`liferay.dev/blogs`, 2022 onward).
 - Plain Markdown files with source URL and fetch time in the frontmatter, plus a
   JSONL search index. No vector database, no embeddings, no bundled Liferay
   content.
@@ -32,10 +33,13 @@ uv run liferay-context-builder
 # 3. Optional: community articles (~1 h)
 uv run liferay-context-builder-community
 
-# 4. Check the result
+# 4. Optional: recent community blog posts from liferay.dev (a few minutes)
+uv run liferay-context-builder-blogs
+
+# 5. Check the result
 uv run liferay-context-builder-doctor
 
-# 5. Stop Firecrawl
+# 6. Stop Firecrawl
 cd /path/to/firecrawl && docker compose stop
 ```
 
@@ -94,6 +98,16 @@ page), batch-scrapes each article as raw HTML, extracts title, tags and
 `.knowledge-article-content`, converts it with `markdownify`, and retries
 missed articles once.
 
+**Community blog posts** (`liferay-context-builder-blogs`): pages through
+`liferay.dev/blogs?delta=20&start=<page>` (newest first) until a page has
+nothing at or after `--since` (default 2022-01-01), then scrapes each post
+as raw HTML and keeps the article body. Listing pages are scraped one at a
+time, 2 s apart; the posts go through one `/v2/batch/scrape` job, and misses
+are retried once. Posts categorised `News` (release announcements, webinars, events)
+are skipped unless `--include-news` is given, and posts already on disk are
+skipped unless `--refresh` is given. The site returns 403 for deep listing
+pages; that ends discovery early, keeps what was found, and exits 1.
+
 **Failure behaviour**
 
 - Firecrawl unreachable → one-line error naming `FIRECRAWL_API_URL`, exit 1.
@@ -112,6 +126,10 @@ uv run liferay-context-builder --max-depth 12 --max-pages 3000
 uv run liferay-context-builder-community                              # How-To + Troubleshooting
 uv run liferay-context-builder-community --resource-type howto        # one type
 uv run liferay-context-builder-community --resource-type troubleshooting --limit 100
+
+uv run liferay-context-builder-blogs                                  # posts since 2022-01-01, no News
+uv run liferay-context-builder-blogs --since 2024-01-01 --limit 20    # smaller test run
+uv run liferay-context-builder-blogs --include-news --refresh         # everything, re-fetch existing
 
 uv run liferay-context-builder-doctor                                 # status of docs + skill
 uv run liferay-context-builder-doctor --project-dir /path/to/project
@@ -147,7 +165,9 @@ By capability:
 ```
 
 Timings: official docs ~20-25 minutes on a warm Firecrawl stack (the first crawl
-after a cold `docker compose up` is noticeably slower); community ~1 hour.
+after a cold `docker compose up` is noticeably slower); community ~1 hour;
+blogs a few minutes for a first run, seconds for a re-run that only
+finds posts already on disk.
 The skill flags docs older than about 7 days, so a weekly refresh is plenty.
 
 ## The Library
@@ -159,6 +179,7 @@ The skill flags docs older than about 7 days, so a weekly refresh is plenty.
   raw/_removed/{capability}/*.md             pages confirmed gone (404/410)
   raw/community-howto/{capability}/*.md
   raw/community-troubleshooting/{capability}/*.md
+  raw/community-blog/_uncategorized/*.md     blog posts, with published_at
   reports/filtered/
     search_index.jsonl                       one JSON line per page
     summary.json                             counts of the last run
@@ -170,7 +191,8 @@ The skill flags docs older than about 7 days, so a weekly refresh is plenty.
 Capabilities: `search`, `commerce`, `development`, `sites`, `low-code`,
 `security`, `self-hosted`, `content-management-system`, `integration`, `cloud`,
 `digital-asset-management`, `personalization`, `ai`, `getting-started`.
-Community articles without a usable capability tag go to `_uncategorized/`.
+Community articles without a usable capability tag go to `_uncategorized/`;
+blog posts are not classified and always go there.
 
 Official page, e.g. `raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md`:
 
@@ -208,7 +230,32 @@ content_hash: "sha256:30a53478..."
 * After upgrading from Liferay 7.0 to a more recent Quarterly Release ...
 ```
 
-Search index line (`reports/filtered/search_index.jsonl`):
+Blog post, e.g. `raw/community-blog/_uncategorized/cookie-consent-management.md`:
+
+```markdown
+---
+url: "https://liferay.dev/b/cookie-consent-management"
+source_type: community-blog
+capability: uncategorized
+author: "David H Nebinger"
+published_at: "2026-09-23"
+categories: "Featured"
+tags: "cookies, cookie management, cmp"
+fetched_at: "2026-09-29T20:34:28Z"
+content_hash: "sha256:529a66a0..."
+---
+# Cookie Consent Management
+```
+
+The search index has one JSON line per page, official docs first, then community
+How-To, Troubleshooting and blogs. Besides `title`, `url`, `source_type`,
+`capability`, `path`, `headings` and `fetched_at`, each line has a one-line
+`summary`, and community pages add `published_at`, `author`, `tags`,
+`categories` and `applicable_versions` when the page has them, so an agent can
+judge relevance and recency from a grep hit without opening the file. Any run
+regenerates it.
+
+Search index line (`reports/filtered/search_index.jsonl`, shortened):
 
 ```json
 {"title": "Cloud Native Experience Cne Kubernetes Ready", "url": "https://learn.liferay.com/w/dxp/self-hosted-installation-and-upgrades/cloud-native-experience/cne-kubernetes-ready", "source_type": "official", "capability": "self-hosted", "path": "raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md", "headings": [], "fetched_at": "2026-09-23T15:58:04Z"}
@@ -218,7 +265,9 @@ Searching it by hand:
 
 ```bash
 cd ~/.liferay-docs
-grep -i "synonym" reports/filtered/search_index.jsonl | head        # shortlist by title/headings
+grep -i "synonym" reports/filtered/search_index.jsonl | head        # shortlist by title/headings/summary
+grep -i "mcp" reports/filtered/search_index.jsonl | grep community-blog \
+  | jq -r '[.published_at,.title,.path]|@tsv'                        # compact blog hits with dates
 grep -ril "client extension" raw/development/ | head                # full-text in one capability
 grep -ril "ClassNotFoundException" raw/community-troubleshooting/   # error text -> troubleshooting
 jq '{discovered_total, fetch_failed_count}' reports/filtered/summary.json
@@ -230,10 +279,16 @@ jq '{discovered_total, fetch_failed_count}' reports/filtered/summary.json
 (`$LIFERAY_DOCS_DIR`, else `~/.liferay-docs`), shortlist via the search index,
 read the matching Markdown, and cite the frontmatter `url`. Community articles
 are labelled as community content and official docs win when both cover a
-topic. A Reference-files table routes platform questions to
+topic. Blog posts are indexed in `search_index.jsonl` (`source_type:
+community-blog`) but the skill has no blog-specific routing or citation rule. A Reference-files table routes platform questions to
 `references/liferay-platform.md` (OSGi/DS, Service Builder, REST Builder,
 Client Extensions, extension-point choice, and the version-upgrade /
-breaking-changes workflow), so the docs lookup stays focused. The skill never
+breaking-changes workflow), so the docs lookup stays focused. The skill also ships
+`scripts/docs.py` (standard library only), which the agent runs for bounded
+lookups: `status` (is the library there and fresh), `search` (AND of terms,
+filter by source, capability or date, ranked compact hits), and `outline` /
+`section` (read one part of a large page). Without `python3` the skill falls
+back to plain `grep`. The skill never
 starts a build itself; when docs are missing or older than ~7 days it tells you
 which command to run.
 
@@ -289,6 +344,11 @@ running instance.
 **`crawl job ... stalled` or `status unavailable`** — the Firecrawl job stopped
 progressing (worker crash, stack restart). Check `docker compose logs api` in
 the Firecrawl checkout, then rerun.
+
+**Blogs run reports `listing page N: ...` under crawl errors** — liferay.dev
+blocked or emptied a listing page (403 on deep pages, or a layout change).
+Posts found before that page were still fetched; rerun later or lower the
+range with `--since`.
 
 **Run ends with fetch failures** — the listed pages failed twice. Rerun later;
 everything already written stays valid and nothing is quarantined on a failed
