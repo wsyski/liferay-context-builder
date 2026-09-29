@@ -105,7 +105,13 @@ as raw HTML and keeps the article body. Listing pages are scraped one at a
 time, 2 s apart; the posts go through one `/v2/batch/scrape` job, and misses
 are retried once. Posts categorised `News` (release announcements, webinars, events)
 are skipped unless `--include-news` is given, and posts already on disk are
-skipped unless `--refresh` is given. The site returns 403 for deep listing
+skipped unless `--refresh` is given or the site's Atom feed (latest 20 posts)
+shows they were edited after they were fetched. Each post is filed under the
+capability its first mappable site category names (`AI`, `Cloud`, `CMS`,
+`Commerce`, `Customer Data`, `Frameworks`, `Integration`, `Low-Code`,
+`Security`, `Sites`); the rest, about 80%, go to `_uncategorized/`, and a
+re-run moves posts whose categories changed without refetching them. The site
+returns 403 for deep listing
 pages; that ends discovery early, keeps what was found, and exits 1.
 
 **Failure behaviour**
@@ -179,7 +185,7 @@ The skill flags docs older than about 7 days, so a weekly refresh is plenty.
   raw/_removed/{capability}/*.md             pages confirmed gone (404/410)
   raw/community-howto/{capability}/*.md
   raw/community-troubleshooting/{capability}/*.md
-  raw/community-blog/_uncategorized/*.md     blog posts, with published_at
+  raw/community-blog/{capability}/*.md       blog posts, with published_at
   reports/filtered/
     search_index.jsonl                       one JSON line per page
     summary.json                             counts of the last run
@@ -191,8 +197,7 @@ The skill flags docs older than about 7 days, so a weekly refresh is plenty.
 Capabilities: `search`, `commerce`, `development`, `sites`, `low-code`,
 `security`, `self-hosted`, `content-management-system`, `integration`, `cloud`,
 `digital-asset-management`, `personalization`, `ai`, `getting-started`.
-Community articles without a usable capability tag go to `_uncategorized/`;
-blog posts are not classified and always go there.
+Community articles and blog posts without a usable capability go to `_uncategorized/`.
 
 Official page, e.g. `raw/self-hosted/cloud-native-experience-cne-kubernetes-ready.md`:
 

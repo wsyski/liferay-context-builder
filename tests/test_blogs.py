@@ -174,6 +174,25 @@ def fake_batch(html_by_slug=None, calls=None):
     return batch
 
 
+def no_feed(url):
+    return ""
+
+
+def feed_markup(*items):
+    entries = "".join(
+        f"<entry><title>{title}</title><published>{published}</published><updated>{updated}</updated></entry>"
+        for title, published, updated in items)
+    return f"<feed>{entries}</feed>"
+
+
+def write_existing(entry_, fetched_at="2026-01-01T00:00:00Z", capability="uncategorized"):
+    path = blogs.post_path(entry_)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'---\nurl: "{entry_.url}"\nsource_type: community-blog\ncapability: {capability}\n'
+                    f'fetched_at: "{fetched_at}"\n---\n# old\n', encoding="utf-8")
+    return path
+
+
 def stub_discovery(monkeypatch, entries):
     monkeypatch.setattr(blogs, "discover_entries", lambda fetch, since, stats, limit=None: entries)
 
@@ -187,7 +206,7 @@ def test_run_skips_news_and_existing_and_writes_post(monkeypatch, tmp_path):
     stub_discovery(monkeypatch, entries)
     calls = []
 
-    stats = blogs.run(None, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(no_feed, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
 
     assert calls == [["https://liferay.dev/b/fresh"]]
     assert (stats.skipped_news, stats.skipped_existing) == (1, 1)
@@ -199,12 +218,108 @@ def test_run_skips_news_and_existing_and_writes_post(monkeypatch, tmp_path):
     assert "# Title fresh" in text
 
 
+def test_capability_comes_from_the_first_mappable_category():
+    assert blogs.capability_for(entry(categories=["Featured", "Platform", "AI", "Security"])) == "ai"
+    assert blogs.capability_for(entry(categories=["Customer Data"])) == "personalization"
+    assert blogs.capability_for(entry(categories=["Featured", "Liferay DXP 2026.Q1"])) is None
+    assert blogs.capability_for(entry()) is None
+
+
+def test_post_is_filed_under_its_capability_with_matching_frontmatter(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    ai_post = entry("ai-post", categories=["Featured", "AI"])
+    stub_discovery(monkeypatch, [ai_post])
+
+    blogs.run(no_feed, fake_batch(), date(2022, 1, 1), include_news=False, refresh=False)
+
+    path = tmp_path / "raw" / "community-blog" / "ai" / "ai-post.md"
+    assert path.exists()
+    assert "capability: ai\n" in path.read_text(encoding="utf-8")
+
+
+def test_existing_post_is_moved_to_its_new_capability_folder_without_refetch(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    moved = entry("moved", categories=["Security"])
+    old_path = tmp_path / "raw" / "community-blog" / "_uncategorized" / "moved.md"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text('---\nurl: "u"\ncapability: uncategorized\nfetched_at: "2026-01-01T00:00:00Z"\n---\n'
+                        "# Moved\n\ncapability: not this line\n", encoding="utf-8")
+    stub_discovery(monkeypatch, [moved])
+    calls = []
+
+    stats = blogs.run(no_feed, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
+
+    new_path = tmp_path / "raw" / "community-blog" / "security" / "moved.md"
+    assert calls == [] and stats.skipped_existing == 1
+    assert not old_path.exists()
+    text = new_path.read_text(encoding="utf-8")
+    assert "capability: security\n" in text and "capability: not this line" in text
+
+
+def test_rewriting_a_post_removes_its_stale_copy_in_another_folder(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    post = entry("dup", categories=["Cloud"])
+    stale = tmp_path / "raw" / "community-blog" / "_uncategorized" / "dup.md"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("---\n---\nold", encoding="utf-8")
+
+    assert blogs.write_post(post, post_html(), blogs.RunStats())
+
+    assert not stale.exists()
+    assert (tmp_path / "raw" / "community-blog" / "cloud" / "dup.md").exists()
+
+
+def test_parse_feed_reads_raw_xml_and_the_rendered_viewer_page():
+    raw = feed_markup(("Post A", "2026-09-28T16:04:00Z", "2026-09-28T17:42:20Z"))
+    viewer = f'<html><body><div id="webkit-xml-viewer-source-xml">{raw}</div></body></html>'
+
+    expected = {("Post A", date(2026, 9, 28)): blogs.datetime(2026, 9, 28, 17, 42, 20, tzinfo=blogs.timezone.utc)}
+    assert blogs.parse_feed(raw) == expected
+    assert blogs.parse_feed(viewer) == expected
+    assert blogs.parse_feed("not a feed") == {}
+
+
+def test_post_edited_after_fetch_according_to_feed_is_refetched(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    edited = entry("edited", published=date(2026, 9, 28))
+    untouched = entry("untouched", published=date(2026, 9, 27))
+    write_existing(edited, fetched_at="2026-09-28T18:00:00Z")
+    write_existing(untouched, fetched_at="2026-09-29T00:00:00Z")
+    stub_discovery(monkeypatch, [edited, untouched])
+    feed = feed_markup(
+        ("Title edited", "2026-09-28T16:04:00Z", "2026-09-29T09:00:00Z"),
+        ("Title untouched", "2026-09-27T16:04:00Z", "2026-09-27T17:00:00Z"),
+    )
+    calls = []
+
+    stats = blogs.run(lambda url: feed, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
+
+    assert calls == [["https://liferay.dev/b/edited"]]
+    assert stats.skipped_existing == 1
+    assert [status for _, status in stats.outcomes] == ["updated"]
+
+
+def test_unreadable_feed_only_warns(monkeypatch, tmp_path, capsys):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    existing = entry("have")
+    write_existing(existing)
+    stub_discovery(monkeypatch, [existing])
+
+    def broken_fetch(url):
+        raise blogs.FetchError("feed 500")
+
+    stats = blogs.run(broken_fetch, fake_batch(), date(2022, 1, 1), include_news=False, refresh=False)
+
+    assert stats.skipped_existing == 1 and stats.crawl_errors == []
+    assert "could not read the blog feed" in capsys.readouterr().err
+
+
 def test_run_makes_no_batch_call_when_nothing_to_fetch(monkeypatch, tmp_path):
     configure_blog_dirs(monkeypatch, tmp_path)
     stub_discovery(monkeypatch, [entry("news", categories=["News"])])
     calls = []
 
-    stats = blogs.run(None, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(no_feed, fake_batch(calls=calls), date(2022, 1, 1), include_news=False, refresh=False)
 
     assert calls == []
     assert stats.fetch_failed == []
@@ -215,8 +330,8 @@ def test_run_refresh_refetches_existing_post(monkeypatch, tmp_path):
     stub_discovery(monkeypatch, [entry("have")])
     batch = fake_batch()
 
-    blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
-    stats = blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=True)
+    blogs.run(no_feed, batch, date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(no_feed, batch, date(2022, 1, 1), include_news=False, refresh=True)
 
     assert [status for _, status in stats.outcomes] == ["unchanged"]
 
@@ -234,7 +349,7 @@ def test_run_retries_a_missed_post_once(monkeypatch, tmp_path):
             html = next(results[slug]) if slug in results else post_html()
             yield fetcher.Page(url, html is not None, None, html)
 
-    stats = blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(no_feed, batch, date(2022, 1, 1), include_news=False, refresh=False)
 
     assert calls == [["https://liferay.dev/b/flaky", "https://liferay.dev/b/good"], ["https://liferay.dev/b/flaky"]]
     assert stats.fetch_failed == []
@@ -245,7 +360,7 @@ def test_run_reports_post_that_fails_twice_and_keeps_others(monkeypatch, tmp_pat
     configure_blog_dirs(monkeypatch, tmp_path)
     stub_discovery(monkeypatch, [entry("bad"), entry("good")])
 
-    stats = blogs.run(None, fake_batch({"bad": None}), date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(no_feed, fake_batch({"bad": None}), date(2022, 1, 1), include_news=False, refresh=False)
 
     assert stats.fetch_failed == ["https://liferay.dev/b/bad"]
     assert len(stats.outcomes) == 1
@@ -255,7 +370,7 @@ def test_run_treats_unparseable_post_as_failed(monkeypatch, tmp_path):
     configure_blog_dirs(monkeypatch, tmp_path)
     stub_discovery(monkeypatch, [entry("empty")])
 
-    stats = blogs.run(None, fake_batch({"empty": "<html><body>no article</body></html>"}), date(2022, 1, 1),
+    stats = blogs.run(no_feed, fake_batch({"empty": "<html><body>no article</body></html>"}), date(2022, 1, 1),
                       include_news=False, refresh=False)
 
     assert stats.fetch_failed == ["https://liferay.dev/b/empty"]
@@ -269,7 +384,7 @@ def test_run_records_batch_crash_and_marks_unreturned_posts_failed(monkeypatch, 
         yield fetcher.Page(urls[0], True, None, post_html())
         raise RuntimeError("batch job b1 ended failed: boom")
 
-    stats = blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
+    stats = blogs.run(no_feed, batch, date(2022, 1, 1), include_news=False, refresh=False)
 
     assert stats.crawl_errors == ["post batch: batch job b1 ended failed: boom"]
     assert stats.fetch_failed == ["https://liferay.dev/b/b"]
@@ -285,7 +400,7 @@ def test_run_propagates_firecrawl_unavailable(monkeypatch, tmp_path):
         yield  # pragma: no cover
 
     with pytest.raises(fetcher.FirecrawlUnavailable):
-        blogs.run(None, batch, date(2022, 1, 1), include_news=False, refresh=False)
+        blogs.run(no_feed, batch, date(2022, 1, 1), include_news=False, refresh=False)
 
 
 def test_main_exits_nonzero_when_run_reports_failure(monkeypatch, tmp_path):

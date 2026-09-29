@@ -4,9 +4,11 @@
 Separate from pipeline.py and community.py: different site, and the lowest
 authority of the three sources -- posts are dated, version-specific opinion
 and walkthroughs, and can contradict the current docs. Written to
-raw/community-blog/_uncategorized/ with source_type, published_at, author
-and categories in the frontmatter, so the liferay-expert skill can cite them
-with a date and a caveat.
+raw/community-blog/{capability}/ (or _uncategorized/) with source_type,
+published_at, author and categories in the frontmatter, so the liferay-expert
+skill can cite them with a date and a caveat. The capability comes from the
+post's site categories (CATEGORY_CAPABILITY); posts with no mappable category
+stay in _uncategorized/.
 
   - Listing pages are fetched one at a time through Firecrawl's /v2/scrape,
     2 s apart: each page decides whether the next is needed, and the site
@@ -21,8 +23,10 @@ with a date and a caveat.
     whatever was found kept.
   - Filtering: posts categorised "News" (release announcements, webinars,
     event recaps) are skipped unless --include-news is given.
-  - Re-runs: posts already on disk are skipped unless --refresh is given,
-    since a full run is a few hundred posts.
+  - Re-runs: posts already on disk are skipped -- moved to the right
+    capability folder if their categories changed -- unless --refresh is
+    given or the site's Atom feed (latest 20 posts) says the post was edited
+    after it was fetched.
 
 Usage:
     uv run liferay-context-builder-blogs
@@ -50,6 +54,7 @@ from .index import (
     build_search_index,
     detect_anomalies,
     ensure_anomalies_report,
+    parse_frontmatter,
     read_body_snapshot,
 )
 
@@ -59,6 +64,22 @@ PAGE_SIZE = 20
 MAX_LISTING_PAGES = 200
 SOURCE_TYPE = "community-blog"
 BUCKET = "_uncategorized"
+FEED_URL = "https://liferay.dev/c/blogs/rss?plid=119785856&groupId=14&displayStyle=abstract"
+# Site category (lowercased) -> capability folder. Exact matches only, first
+# category in listing order wins; anything else (Platform, Featured, version
+# labels, ...) is too broad to guess at and goes to _uncategorized.
+CATEGORY_CAPABILITY = {
+    "ai": "ai",
+    "cloud": "cloud",
+    "cms": "content-management-system",
+    "commerce": "commerce",
+    "customer data": "personalization",
+    "frameworks": "development",
+    "integration": "integration",
+    "low-code": "low-code",
+    "security": "security",
+    "sites": "sites",
+}
 NEWS_CATEGORY = "News"
 DEFAULT_SINCE = date(2022, 1, 1)
 
@@ -171,8 +192,33 @@ def extract_post(html: str) -> str | None:
     return markdownify(str(body_el), heading_style="ATX")
 
 
+def capability_for(entry: ListingEntry) -> str | None:
+    return next((CATEGORY_CAPABILITY[c.lower()] for c in entry.categories if c.lower() in CATEGORY_CAPABILITY), None)
+
+
 def post_path(entry: ListingEntry) -> Path:
-    return RAW_DIR / SOURCE_TYPE / BUCKET / f"{safe_filename_stem(entry.url.rsplit('/', 1)[-1])}.md"
+    return RAW_DIR / SOURCE_TYPE / (capability_for(entry) or BUCKET) / f"{safe_filename_stem(entry.url.rsplit('/', 1)[-1])}.md"
+
+
+def other_copies(entry: ListingEntry) -> list[Path]:
+    """The same post filed under a different capability folder (categories changed since it was written)."""
+    target = post_path(entry)
+    return [p for p in (RAW_DIR / SOURCE_TYPE).glob(f"*/{target.name}") if p != target]
+
+
+def settle_existing(entry: ListingEntry) -> Path | None:
+    """The post's file if it is on disk, first moving it to the folder its
+    current categories call for (no re-fetch needed)."""
+    target = post_path(entry)
+    if target.exists():
+        return target
+    for old in other_copies(entry):
+        text = re.sub(r"^capability: .*$", f"capability: {capability_for(entry) or 'uncategorized'}",
+                      old.read_text(encoding="utf-8"), count=1, flags=re.MULTILINE)
+        atomic_write_text(target, text)
+        old.unlink()
+        return target
+    return None
 
 
 def build_frontmatter(entry: ListingEntry, full_content: str) -> str:
@@ -182,7 +228,7 @@ def build_frontmatter(entry: ListingEntry, full_content: str) -> str:
         "---",
         f"url: {quote_frontmatter_value(entry.url)}",
         f"source_type: {SOURCE_TYPE}",
-        "capability: uncategorized",
+        f"capability: {capability_for(entry) or 'uncategorized'}",
         f"author: {quote_frontmatter_value(entry.author)}",
         f"published_at: {quote_frontmatter_value(entry.published.isoformat())}",
         f"categories: {quote_frontmatter_value(', '.join(entry.categories))}",
@@ -205,6 +251,35 @@ def read_existing_hash(path: Path) -> str | None:
     return None
 
 
+def parse_feed(markup: str) -> dict[tuple[str, date], datetime]:
+    """(title, published date) -> last-updated time for each Atom entry. The
+    feed's links are opaque entry ids, so posts are matched by title and date.
+    Works on raw XML and on the rendered XML-viewer page Firecrawl returns."""
+    updates = {}
+    for item in BeautifulSoup(markup, "html.parser").find_all("entry"):
+        title, published, updated = (item.find(tag) for tag in ("title", "published", "updated"))
+        if not (title and published and updated):
+            continue
+        try:
+            when = datetime.fromisoformat(updated.get_text(strip=True).replace("Z", "+00:00"))
+            day = datetime.fromisoformat(published.get_text(strip=True).replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        updates[(title.get_text(strip=True), day)] = when
+    return updates
+
+
+def edited_since_fetch(entry: ListingEntry, path: Path, updates: dict) -> bool:
+    updated = updates.get((entry.title, entry.published))
+    if updated is None:
+        return False
+    fetched = parse_frontmatter(path.read_text(encoding="utf-8"))[0].get("fetched_at", "")
+    try:
+        return updated > datetime.fromisoformat(fetched.replace("Z", "+00:00"))
+    except ValueError:
+        return True  # no usable fetch time: re-fetch rather than trust it
+
+
 def write_post(entry: ListingEntry, html: str, stats: RunStats) -> bool:
     # One bad post must not kill a run that fetches hundreds -- record it and move on.
     try:
@@ -220,10 +295,12 @@ def write_post(entry: ListingEntry, html: str, stats: RunStats) -> bool:
         append_anomalies(
             FILTERED_DIR / ANOMALIES_NAME,
             detect_anomalies(
-                path=out_path, url=entry.url, source_type=SOURCE_TYPE, capability=BUCKET,
+                path=out_path, url=entry.url, source_type=SOURCE_TYPE, capability=capability_for(entry) or BUCKET,
                 body=body, previous=previous_snapshot,
             ),
         )
+        for stale in other_copies(entry):
+            stale.unlink()
         new_hash = read_existing_hash(out_path)
         status = "new" if not existed_before else ("unchanged" if old_hash == new_hash else "updated")
         stats.outcomes.append((entry.url, status))
@@ -265,11 +342,19 @@ def run(fetch, batch_scrape, since: date, include_news: bool, refresh: bool, lim
     stats.discovered_total = len(entries)
     print(f"  {len(entries)} posts found", flush=True)
 
+    try:
+        updates = parse_feed(fetch(FEED_URL))
+    except FetchError as exc:
+        updates = {}
+        print(f"  WARNING: could not read the blog feed, edited posts won't be refreshed: {exc}", file=sys.stderr)
+
     todo = []
     for entry in entries:
         if not include_news and NEWS_CATEGORY in entry.categories:
             stats.skipped_news += 1
-        elif not refresh and post_path(entry).exists():
+            continue
+        existing = settle_existing(entry)
+        if existing and not refresh and not edited_since_fetch(entry, existing, updates):
             stats.skipped_existing += 1
         else:
             todo.append(entry)

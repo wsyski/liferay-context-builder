@@ -139,7 +139,7 @@ citing rules above). Same folder layout as `raw/`, one source per folder:
 |---|---|---|
 | `raw/community-howto/{capability}/` (`_uncategorized/` for untagged) | KB how-to recipes (learn.liferay.com/kb-article), ~1,400 | a "how do I..." the official docs don't answer |
 | `raw/community-troubleshooting/{capability}/` | KB troubleshooting entries, ~3,700, titled after the error | an error message or symptom |
-| `raw/community-blog/_uncategorized/` | liferay.dev blog posts from 2022 on, technical ones only (no announcements), with `published_at`, `author`, `tags` | recent features, design rationale, walkthroughs |
+| `raw/community-blog/{capability}/` (`_uncategorized/` when no site category maps; most are) | liferay.dev blog posts from 2022 on, no announcements, with `published_at`, `author`, `tags` | recent features, design rationale, walkthroughs |
 
 They come from optional, separate builder commands
 (`uv run liferay-context-builder-community`, `uv run liferay-context-builder-blogs`);
