@@ -263,3 +263,48 @@ def test_crawl_skips_documents_with_no_resolved_url(monkeypatch):
     )
     pages = list(fetcher.crawl("https://x/", {}))
     assert pages == []
+
+
+def test_batch_scrape_splits_into_jobs_of_at_most_chunk_size(monkeypatch):
+    api = FakeApi(
+        [
+            {"success": True, "id": "b1"},
+            {"status": "completed", "data": [doc("https://x/a"), doc("https://x/b")], "next": None},
+            {"success": True, "id": "b2"},
+            {"status": "completed", "data": [doc("https://x/c")], "next": None},
+        ]
+    )
+    monkeypatch.setattr(fetcher, "_request", api)
+
+    pages = {p.url: p.success for p in fetcher.batch_scrape(["https://x/a", "https://x/b", "https://x/c"], {}, chunk_size=2)}
+
+    assert pages == {"https://x/a": True, "https://x/b": True, "https://x/c": True}
+    starts = [c for c in api.calls if c[0] == "POST"]
+    assert [c[2]["urls"] for c in starts] == [["https://x/a", "https://x/b"], ["https://x/c"]]
+
+
+def test_batch_scrape_survives_a_failed_job_and_marks_only_its_urls_failed(monkeypatch, capsys):
+    api = FakeApi(
+        [
+            {"success": True, "id": "b1"},
+            {"status": "failed", "error": "boom", "data": [doc("https://x/a")], "next": None},
+            {"success": True, "id": "b2"},
+            {"status": "completed", "data": [doc("https://x/c")], "next": None},
+        ]
+    )
+    monkeypatch.setattr(fetcher, "_request", api)
+
+    pages = {p.url: p.success for p in fetcher.batch_scrape(["https://x/a", "https://x/b", "https://x/c"], {}, chunk_size=2)}
+
+    assert pages == {"https://x/a": True, "https://x/b": False, "https://x/c": True}
+    assert "batch job for 2 URLs failed" in capsys.readouterr().err
+
+
+def test_batch_scrape_lets_firecrawl_unavailable_stop_the_run(monkeypatch):
+    def down(method, path, payload=None):
+        raise fetcher.FirecrawlUnavailable("down")
+
+    monkeypatch.setattr(fetcher, "_request", down)
+
+    with pytest.raises(fetcher.FirecrawlUnavailable):
+        list(fetcher.batch_scrape(["https://x/a"], {}))

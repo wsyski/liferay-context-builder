@@ -49,6 +49,12 @@ larger and lower-authority:
     are also printed at the end and written to the run's summary report,
     so CAPABILITY_TAG_MAP can be extended later without re-scraping.
 
+  - Resuming: articles already on disk are skipped (and moved to the folder
+    their stored Capability tag maps to today) unless --refresh is given, so
+    a run that lost articles to Firecrawl only refetches what is missing.
+    Failed articles are retried in up to MAX_RETRY_ROUNDS further rounds,
+    stopping early if a round recovers none.
+
 Usage:
     uv run liferay-context-builder-community
     uv run liferay-context-builder-community --resource-type howto
@@ -76,6 +82,7 @@ from .index import (
     build_search_index,
     detect_anomalies,
     ensure_anomalies_report,
+    parse_frontmatter,
     read_body_snapshot,
 )
 
@@ -87,6 +94,8 @@ RESOURCE_TYPES = {
 }
 PAGE_SIZE = 60
 LISTING_RETRY_DELAY_SECONDS = 5
+# Retry rounds over the articles that failed; stops early when a round recovers nothing.
+MAX_RETRY_ROUNDS = 3
 KB_ARTICLE_URL_PATTERN = re.compile(r"https://learn\.liferay\.com/kb-article/[a-zA-Z0-9\-]+")
 
 # listing is server-rendered (spike) -- no JS wait needed
@@ -125,16 +134,20 @@ CAPABILITY_TAG_MAP = {
 
 
 def map_capability(tag_text: str | None) -> str | None:
-    """tag_text may hold more than one value, comma-separated (see
-    extract_article) -- return the first one that maps to a known
-    capability, or None if none of them do."""
+    """tag_text may hold several comma-separated values (see extract_article),
+    and some known tag names contain commas themselves ("DXP Self-Hosted
+    Installation, Maintenance, and Administration"), so look for each known
+    name as a whole value rather than splitting on commas. The value that
+    appears first in the text wins; None if no known name appears."""
     if not tag_text:
         return None
-    for part in tag_text.split(","):
-        mapped = CAPABILITY_TAG_MAP.get(part.strip().lower())
-        if mapped:
-            return mapped
-    return None
+    text = tag_text.lower()
+    best = None
+    for name, capability in CAPABILITY_TAG_MAP.items():
+        match = re.search(rf"(?:^|,\s*){re.escape(name)}\s*(?:,|$)", text)
+        if match and (best is None or match.start() < best[0]):
+            best = (match.start(), capability)
+    return best[1] if best else None
 
 
 @dataclass
@@ -148,6 +161,7 @@ class ArticleOutcome:
 @dataclass
 class RunStats:
     discovered_total: int = 0
+    skipped_existing: int = 0
     fetch_failed: list[str] = field(default_factory=list)
     crawl_errors: list[str] = field(default_factory=list)
     unmapped_capability_tags: dict[str, int] = field(default_factory=dict)
@@ -327,8 +341,30 @@ def handle_article(result, source_type: str, stats: RunStats) -> bool:
         return False
 
 
+def existing_articles(source_type: str) -> dict[str, Path]:
+    """slug -> file for every article already on disk, whatever capability folder it is in."""
+    return {p.stem: p for p in (RAW_DIR / source_type).glob("*/*.md")}
+
+
+def settle_existing(path: Path, source_type: str) -> Path:
+    """Move an article already on disk to the folder its stored Capability tag
+    maps to today (the mapping improves over time), without refetching it."""
+    frontmatter = parse_frontmatter(path.read_text(encoding="utf-8"))[0]
+    capability = map_capability(frontmatter.get("capability_tag_raw"))
+    bucket = capability or "_uncategorized"
+    if path.parent.name == bucket:
+        return path
+    target = RAW_DIR / source_type / bucket / path.name
+    text = re.sub(r"^capability: .*$", f"capability: {capability or 'uncategorized'}",
+                  path.read_text(encoding="utf-8"), count=1, flags=re.MULTILINE)
+    atomic_write_text(target, text)
+    path.unlink()
+    return target
+
+
 def run_resource_type(
     client, key: str, resource_type_id: str, source_type: str, limit: int | None = None,
+    refresh: bool = False,
 ) -> RunStats:
     stats = RunStats()
     print(f"\n=== {key} ({source_type}) ===")
@@ -337,20 +373,38 @@ def run_resource_type(
     stats.discovered_total = len(urls)
     print(f"  {len(urls)} URLs found")
 
-    try:
-        retry = []
-        for done, result in enumerate(client.batch_scrape(urls, ARTICLE_OPTIONS), start=1):
-            if done % 200 == 0:
-                print(f"  ...{done}/{len(urls)}")
-            if not handle_article(result, source_type, stats):
-                retry.append(result.url)
+    if not refresh:
+        on_disk = existing_articles(source_type)
+        todo = []
+        for url in urls:
+            existing = on_disk.get(safe_slug(url))
+            if existing is None:
+                todo.append(url)
+            else:
+                settle_existing(existing, source_type)
+                stats.skipped_existing += 1
+        urls = todo
+        if stats.skipped_existing:
+            print(f"  {stats.skipped_existing} already on disk (use --refresh to refetch); {len(urls)} to fetch")
 
-        # Spike: ~5% transient misses, all fine on retry.
-        if retry:
-            print(f"  retrying {len(retry)} articles once...", flush=True)
-            for result in client.batch_scrape(retry, ARTICLE_OPTIONS):
+    try:
+        pending = urls
+        for attempt in range(1 + MAX_RETRY_ROUNDS):
+            if not pending:
+                break
+            if attempt:
+                print(f"  retry round {attempt}: {len(pending)} articles...", flush=True)
+            failed = []
+            for done, result in enumerate(client.batch_scrape(pending, ARTICLE_OPTIONS), start=1):
+                if done % 200 == 0:
+                    print(f"  ...{done}/{len(pending)}", flush=True)
                 if not handle_article(result, source_type, stats):
-                    stats.fetch_failed.append(result.url)
+                    failed.append(result.url)
+            if attempt and len(failed) == len(pending):
+                pending = failed
+                break  # a whole round recovered nothing: stop hammering the site
+            pending = failed
+        stats.fetch_failed.extend(pending)
     except fetcher.FirecrawlUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - keep partial report data for long runs
@@ -373,6 +427,7 @@ def write_report(key: str, stats: RunStats) -> None:
     report_path = FILTERED_DIR / f"{key}_summary.json"
     atomic_write_text(report_path, json.dumps({
         "discovered_total": stats.discovered_total,
+        "skipped_existing": stats.skipped_existing,
         "written_total": len(stats.outcomes),
         "fetch_failed_count": len(stats.fetch_failed),
         "crawl_error_count": len(stats.crawl_errors),
@@ -386,6 +441,8 @@ def write_report(key: str, stats: RunStats) -> None:
 def print_summary(key: str, stats: RunStats) -> None:
     print(f"\n--- {key}: summary ---")
     print(f"Discovered: {stats.discovered_total}")
+    if stats.skipped_existing:
+        print(f"Already on disk, not refetched: {stats.skipped_existing}")
     print(f"Written: {len(stats.outcomes)}")
     if stats.crawl_errors:
         print(f"Fatal crawl errors: {len(stats.crawl_errors)}")
@@ -401,7 +458,7 @@ def print_summary(key: str, stats: RunStats) -> None:
             print(f'  "{tag}": {count} articles')
 
 
-def run_all(resource_type_filter: str | None, limit: int | None) -> bool:
+def run_all(resource_type_filter: str | None, limit: int | None, refresh: bool = False) -> bool:
     any_failures = False
     ensure_anomalies_report(FILTERED_DIR)
     for key, (resource_type_id, source_type) in RESOURCE_TYPES.items():
@@ -411,7 +468,7 @@ def run_all(resource_type_filter: str | None, limit: int | None) -> bool:
         # other resource type its multi-hour run too -- report what
         # happened and keep going.
         try:
-            stats = run_resource_type(fetcher, key, resource_type_id, source_type, limit=limit)
+            stats = run_resource_type(fetcher, key, resource_type_id, source_type, limit=limit, refresh=refresh)
         except fetcher.FirecrawlUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -430,11 +487,13 @@ def main() -> None:
                          help="Only scrape one resource type (default: both howto and troubleshooting).")
     parser.add_argument("--limit", type=int, default=None,
                          help="Only fetch the first N discovered articles per resource type (smaller test run).")
+    parser.add_argument("--refresh", action="store_true",
+                         help="Refetch articles that are already on disk (default: only fetch missing ones).")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be greater than zero")
     try:
-        failed = run_all(args.resource_type, args.limit)
+        failed = run_all(args.resource_type, args.limit, args.refresh)
     except fetcher.FirecrawlUnavailable as exc:
         print(f"ERROR: {exc}\n  Set FIRECRAWL_API_URL or start the stack: "
               "cd /path/to/firecrawl && docker compose up -d", file=sys.stderr)

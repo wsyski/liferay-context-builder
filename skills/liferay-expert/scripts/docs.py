@@ -136,10 +136,12 @@ def match_expression(terms: list[str], joiner: str) -> str:
     return joiner.join('"' + t.replace('"', '""') + '"' for t in terms if re.search(r"\w", t))
 
 
+# bm25 column weights: title, headings, tags, body. Tuned against evals/search_eval.py:
+# a match in the title should dominate a page that merely mentions the words often.
 HIT_SQL = """
 SELECT path, title, source_type, capability, published_at, snippet(docs, -1, '«', '»', ' … ', 28)
 FROM docs WHERE docs MATCH :query {filters}
-ORDER BY bm25(docs, 10.0, 5.0, 3.0, 1.0)
+ORDER BY bm25(docs, 40.0, 5.0, 3.0, 1.0)
          + CASE source_type WHEN 'official' THEN 0 WHEN 'community-blog' THEN 2 ELSE 1 END,
          published_at DESC
 LIMIT :limit

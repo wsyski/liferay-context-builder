@@ -20,6 +20,11 @@ POLL_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 180
 STALL_TIMEOUT_SECONDS = 600
 MAX_MISSING_STATUS_POLLS = 6
+# A batch of thousands of URLs overwhelms the self-hosted worker pool: Firecrawl's
+# stall reaper fails jobs that sit claimed but unworked (measured: one batch of
+# 3,603 kept 42% of its pages, one of 1,327 kept 99%). Batches are therefore
+# split into jobs of at most this many URLs, run one after another.
+BATCH_CHUNK_SIZE = 100
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
 
@@ -173,7 +178,7 @@ def crawl(seed_url: str, request: dict) -> Iterator[Page]:
     yield from _crawl_failures(job_id, seed_url, seen)
 
 
-def batch_scrape(urls: list[str], options: dict) -> Iterator[Page]:
+def _batch_scrape_job(urls: list[str], options: dict) -> Iterator[Page]:
     job_id = _start("/v2/batch/scrape", {"urls": urls, **options})
     seen = set()
     for doc in _collect("batch/scrape", job_id):
@@ -185,3 +190,24 @@ def batch_scrape(urls: list[str], options: dict) -> Iterator[Page]:
     for url in urls:
         if match_key(url) not in seen:
             yield Page(url, False, None, None)
+
+
+def batch_scrape(urls: list[str], options: dict, chunk_size: int = BATCH_CHUNK_SIZE) -> Iterator[Page]:
+    """Scrape urls as consecutive batch jobs of at most chunk_size, yielding one
+    Page per URL (a failed Page for any URL the job did not return). A job that
+    dies is reported on stderr and its unreturned URLs come back as failed
+    Pages, so the caller's retry pass gets them and later chunks still run."""
+    for start in range(0, len(urls), chunk_size):
+        chunk = urls[start:start + chunk_size]
+        yielded = set()
+        try:
+            for page in _batch_scrape_job(chunk, options):
+                yielded.add(match_key(page.url))
+                yield page
+        except FirecrawlUnavailable:
+            raise
+        except RuntimeError as exc:
+            print(f"  WARNING: batch job for {len(chunk)} URLs failed: {exc}", file=sys.stderr)
+            for url in chunk:
+                if match_key(url) not in yielded:
+                    yield Page(url, False, None, None)
