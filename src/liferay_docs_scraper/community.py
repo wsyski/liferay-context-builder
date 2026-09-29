@@ -59,6 +59,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +86,7 @@ RESOURCE_TYPES = {
     "troubleshooting": ("33315839", "community-troubleshooting"),
 }
 PAGE_SIZE = 60
+LISTING_RETRY_DELAY_SECONDS = 5
 KB_ARTICLE_URL_PATTERN = re.compile(r"https://learn\.liferay\.com/kb-article/[a-zA-Z0-9\-]+")
 
 # listing is server-rendered (spike) -- no JS wait needed
@@ -170,6 +172,10 @@ def discover_article_urls(
     while True:
         url = f"{SEARCH_URL}?q=&resource-type={resource_type_id}&delta={PAGE_SIZE}&start={page}"
         result = client.scrape(url, LISTING_OPTIONS)
+        if not result.success:
+            # one transient miss must not cost the whole resource type its multi-hour run
+            time.sleep(LISTING_RETRY_DELAY_SECONDS)
+            result = client.scrape(url, LISTING_OPTIONS)
         if not result.success:
             raise RuntimeError(f"search listing page {page} failed: {url}")
         page_urls = extract_article_links(result.html)

@@ -46,13 +46,30 @@ def test_extract_article_links_keeps_absolute_kb_article_urls_only():
     }
 
 
-def test_discover_article_urls_raises_when_listing_fetch_fails():
+def test_discover_article_urls_raises_when_listing_fetch_fails_twice(monkeypatch):
+    monkeypatch.setattr(community.time, "sleep", lambda s: None)
+    calls = []
+
     class FakeClient:
         def scrape(self, url, options):
+            calls.append(url)
             return SimpleNamespace(success=False)
 
     with pytest.raises(RuntimeError, match="search listing page .* failed"):
         community.discover_article_urls(FakeClient(), "33317328")
+    assert len(calls) == 2
+
+
+def test_discover_article_urls_retries_a_transient_listing_miss(monkeypatch):
+    monkeypatch.setattr(community.time, "sleep", lambda s: None)
+    html = '<a href="https://learn.liferay.com/kb-article/a"></a>'
+    results = iter([SimpleNamespace(success=False), SimpleNamespace(success=True, html=html)])
+
+    class FakeClient:
+        def scrape(self, url, options):
+            return next(results, SimpleNamespace(success=True, html=html))
+
+    assert community.discover_article_urls(FakeClient(), "33317328") == ["https://learn.liferay.com/kb-article/a"]
 
 
 def test_discover_article_urls_stops_when_no_new_links():
