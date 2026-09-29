@@ -3,13 +3,14 @@
 
 import argparse
 import json
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .filter_urls import CAPABILITIES, resolve_docs_dir
-from .index import ANOMALIES_NAME, COMMUNITY_SOURCE_TYPES, SEARCH_INDEX_NAME, parse_frontmatter
+from .index import ANOMALIES_NAME, COMMUNITY_SOURCE_TYPES, SEARCH_DB_NAME, SEARCH_INDEX_NAME, parse_frontmatter
 
 STALE_AFTER_DAYS = 7
 SECONDS_PER_DAY = 24 * 60 * 60
@@ -26,6 +27,7 @@ class DoctorResult:
     coverage_gap_count: int = 0
     direct_refreshed_count: int = 0
     search_index_count: int = 0
+    full_text_pages: int | None = None
     anomaly_count: int = 0
     oldest_fetched_at: datetime | None = None
     newest_fetched_at: datetime | None = None
@@ -96,6 +98,17 @@ def count_jsonl(path: Path) -> int:
         return 0
 
 
+def count_full_text_pages(path: Path) -> int | None:
+    """Pages in the FTS5 database, or None if it is missing or unreadable."""
+    if not path.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            return connection.execute("SELECT count(*) FROM docs").fetchone()[0]
+    except sqlite3.Error:
+        return None
+
+
 def read_summary(docs_dir: Path) -> dict:
     summary_path = docs_dir / "reports" / "filtered" / "summary.json"
     if not summary_path.exists():
@@ -131,6 +144,7 @@ def inspect_installation(docs_dir: Path, project_dir: Path) -> DoctorResult:
         coverage_gap_count=summary_int(summary, "coverage_gap_count"),
         direct_refreshed_count=summary_int(summary, "direct_refreshed_count"),
         search_index_count=count_jsonl(reports_dir / SEARCH_INDEX_NAME),
+        full_text_pages=count_full_text_pages(reports_dir / SEARCH_DB_NAME),
         anomaly_count=count_jsonl(reports_dir / ANOMALIES_NAME),
         oldest_fetched_at=oldest_fetched_at,
         newest_fetched_at=newest_fetched_at,
@@ -150,6 +164,9 @@ def print_result(result: DoctorResult) -> None:
     if result.newest_fetched_at:
         print(f"Official freshness: {format_fetch_window(result)}")
     print(f"Search index: {result.search_index_count} entries")
+    full_text = (f"{result.full_text_pages} pages" if result.full_text_pages is not None
+                 else "MISSING (built at the end of each liferay-context-builder stage)")
+    print(f"Full-text index: {full_text}")
     print(f"Anomalies report: {result.anomaly_count} entries")
     if result.coverage_gap_count:
         print(

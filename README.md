@@ -131,6 +131,7 @@ and `--max-pages` apply to the official stage only.
 ```bash
 uv run liferay-context-builder                      # everything: official docs, community KB articles, blogs
 uv run liferay-context-builder --official-only      # official docs only (~20-25 min)
+uv run liferay-context-builder --reindex-only       # rebuild search.db and search_index.jsonl, no crawling (seconds)
 uv run liferay-context-builder --official-only --max-pages 30   # quick smoke run
 uv run liferay-context-builder --official-only --max-depth 12 --max-pages 3000
 
@@ -193,6 +194,7 @@ The skill flags docs older than about 7 days, so a weekly refresh is plenty.
   raw/community-troubleshooting/{capability}/*.md
   raw/community-blog/{capability}/*.md       blog posts, with published_at
   reports/filtered/
+    search.db                                full-text (SQLite FTS5) index of every page body
     search_index.jsonl                       one JSON line per page
     summary.json                             counts of the last run
     anomalies.jsonl                          short/odd pages worth a check
@@ -296,10 +298,15 @@ community-blog`) but the skill has no blog-specific routing or citation rule. A 
 Client Extensions, extension-point choice, and the version-upgrade /
 breaking-changes workflow), so the docs lookup stays focused. The skill also ships
 `scripts/docs.py` (standard library only), which the agent runs for bounded
-lookups: `status` (is the library there and fresh), `search` (AND of terms,
-filter by source, capability or date, ranked compact hits), and `outline` /
-`section` (read one part of a large page). Without `python3` the skill falls
-back to plain `grep`. The skill never
+lookups: `status` (is the library there and fresh), `search` (full-text over
+titles, headings, tags and page bodies, stemmed and BM25-ranked, filtered by
+source, capability or date, each hit with the passage that matched), and
+`outline` / `section` (read one part of a large page). `search` reads
+`reports/filtered/search.db`, an SQLite FTS5 index the builder regenerates at
+the end of every stage; if it is missing or older than the Markdown files,
+search falls back to the title/summary index and says so. Without `python3` the
+skill falls back to plain `grep`. There are no embeddings: the agent rewrites
+its own queries when one misses. The skill never
 starts a build itself; when docs are missing or older than ~7 days it tells you
 which command to run.
 

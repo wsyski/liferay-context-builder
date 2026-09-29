@@ -311,3 +311,23 @@ def test_retry_failed_pages_recovers_transient_empty_page(monkeypatch, tmp_path)
 
     assert stats.fetch_failed == []
     assert stats.outcomes["search"][0].status == "new"
+
+
+def test_main_reindex_only_rebuilds_indexes_without_crawling(monkeypatch, tmp_path, capsys):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    page = tmp_path / "raw" / "search" / "a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text('---\ncapability: search\n---\n# A\n\nBody text.\n', encoding="utf-8")
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no crawling expected")
+
+    monkeypatch.setattr(pipeline, "run_crawl", must_not_run)
+    monkeypatch.setattr(pipeline.community, "run_all", must_not_run)
+    monkeypatch.setattr(pipeline.blogs, "ingest", must_not_run)
+    monkeypatch.setattr("sys.argv", ["liferay-context-builder", "--reindex-only"])
+
+    pipeline.main()
+
+    assert "Indexed 1 pages" in capsys.readouterr().out
+    assert (tmp_path / "reports" / "filtered" / "search_index.jsonl").exists()

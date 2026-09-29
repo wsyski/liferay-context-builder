@@ -2,7 +2,7 @@
 """Bounded lookups over the local Liferay docs library (standard library only).
 
   docs.py status                          is the library there, and how fresh?
-  docs.py search TERM [TERM...]           ranked, compact hits from the search index
+  docs.py search TERM [TERM...]           ranked full-text hits (page bodies included), with the matching passage
   docs.py outline PATH                    headings of one page, with line numbers
   docs.py section PATH HEADING            just that section of a large page
 
@@ -17,11 +17,13 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 INDEX_RELATIVE = Path("reports") / "filtered" / "search_index.jsonl"
+DB_RELATIVE = Path("reports") / "filtered" / "search.db"
 SOURCES = {
     "official": "official",
     "howto": "community-howto",
@@ -31,6 +33,7 @@ SOURCES = {
 RANK = {"official": 0, "community-howto": 1, "community-troubleshooting": 2, "community-blog": 3}
 STALE_AFTER_DAYS = 7
 SUMMARY_CHARS = 160
+SNIPPET_CHARS = 220
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 UNDERLINE_RE = re.compile(r"=+|-{3,}")
 LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -80,6 +83,13 @@ def cmd_status(args) -> None:
         if dated:
             line += f"  published {min(dated)} .. {max(dated)}"
         print(line)
+    connection, reason = open_db(docs)
+    if connection is None:
+        print(f"  full-text search: unavailable ({reason})")
+    else:
+        pages = connection.execute("SELECT count(*) FROM docs").fetchone()[0]
+        connection.close()
+        print(f"  full-text search: ready ({pages} pages)")
     if not any(e.get("source_type") == "official" for e in entries):
         print("  No official docs indexed: run uv run liferay-context-builder")
 
@@ -95,8 +105,99 @@ def relevance(entry: dict, terms: list[str]) -> int | None:
     return sum(3 * (t in title) + 2 * (t in headings) + 1 for t in terms)
 
 
-def cmd_search(args) -> None:
-    docs = docs_dir(args.docs_dir)
+def db_stale_reason(docs: Path, db: Path) -> str | None:
+    """Why the full-text database can't be trusted, or None. Builder runs replace
+    files atomically, so a directory's mtime moves whenever a page changes."""
+    if not db.exists():
+        return "no search.db (built by the liferay-context-builder commands)"
+    newest = max((os.stat(root).st_mtime for root, _dirs, _files in os.walk(docs / "raw")), default=0)
+    if newest > db.stat().st_mtime:
+        return "search.db is older than the Markdown files (a build is running or unfinished)"
+    return None
+
+
+def open_db(docs: Path) -> tuple[sqlite3.Connection | None, str | None]:
+    """(connection, None) when full-text search is usable, else (None, reason)."""
+    db = docs / DB_RELATIVE
+    reason = db_stale_reason(docs, db)
+    if reason:
+        return None, reason
+    try:
+        connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        connection.execute("SELECT 1 FROM docs LIMIT 1")
+        return connection, None
+    except sqlite3.Error as exc:
+        return None, f"search.db unusable ({exc})"
+
+
+def match_expression(terms: list[str], joiner: str) -> str:
+    """Each term as an FTS5 phrase, so identifiers like company.security.auth.type
+    and operators like AND/NEAR in user text can't be misread as query syntax."""
+    return joiner.join('"' + t.replace('"', '""') + '"' for t in terms if re.search(r"\w", t))
+
+
+HIT_SQL = """
+SELECT path, title, source_type, capability, published_at, snippet(docs, -1, '«', '»', ' … ', 28)
+FROM docs WHERE docs MATCH :query {filters}
+ORDER BY bm25(docs, 10.0, 5.0, 3.0, 1.0)
+         + CASE source_type WHEN 'official' THEN 0 WHEN 'community-blog' THEN 2 ELSE 1 END,
+         published_at DESC
+LIMIT :limit
+"""
+
+
+def full_text_hits(connection, args, joiner: str) -> tuple[list[tuple], int]:
+    filters, params = [], {"query": match_expression(args.terms, joiner), "limit": args.limit}
+    if not params["query"]:
+        return [], 0
+    if args.source:
+        filters.append("AND source_type = :source")
+        params["source"] = SOURCES[args.source]
+    if args.capability:
+        filters.append("AND capability = :capability")
+        params["capability"] = args.capability
+    if args.since:  # undated pages (official docs) are never dropped by --since
+        filters.append("AND (published_at = '' OR published_at >= :since)")
+        params["since"] = args.since
+    where = " ".join(filters)
+    total = connection.execute(f"SELECT count(*) FROM docs WHERE docs MATCH :query {where}", params).fetchone()[0]
+    return connection.execute(HIT_SQL.format(filters=where), params).fetchall(), total
+
+
+def print_hit(number: int, source: str, title: str, capability: str, published: str, path: str, detail: str) -> None:
+    meta = " | ".join(x for x in (capability, published) if x)
+    print(f"{number}. [{source}] {title} | {meta}")
+    print(f"   {path}")
+    if detail:
+        print(f"   {detail}")
+
+
+def search_full_text(connection, args) -> bool:
+    """Print full-text hits; False only if the database could not answer."""
+    try:
+        rows, total = full_text_hits(connection, args, " ")
+        partial = False
+        if not rows and len(args.terms) > 1:
+            rows, total = full_text_hits(connection, args, " OR ")
+            partial = bool(rows)
+    except sqlite3.Error:
+        return False
+    if not rows:
+        print(f"No hits for: {' '.join(args.terms)}. Try other keywords or drop a filter.")
+        return True
+    if partial:
+        print("No page matches all the terms; closest partial matches:")
+    for number, (path, title, source, capability, published, passage) in enumerate(rows, start=1):
+        passage = re.sub(r"[=-]{4,}", " ", passage)  # title underlines from the Markdown
+        print_hit(number, source, title, capability, published, path, " ".join(passage.split())[:SNIPPET_CHARS])
+    if total > len(rows):
+        print(f"\n{len(rows)} of {total} matches shown; narrow with more terms, --source, --capability or --since.")
+    return True
+
+
+def search_titles(docs: Path, args) -> None:
+    """Fallback without full-text: every term must appear in a page's index
+    entry (title, headings, tags, summary, path)."""
     terms = [t.lower() for t in args.terms]
     source = SOURCES[args.source] if args.source else None
     hits = []
@@ -119,15 +220,26 @@ def cmd_search(args) -> None:
     hits.sort(key=lambda h: h[1].get("published_at", ""), reverse=True)  # newest first, then a stable sort:
     hits.sort(key=lambda h: (-h[0], RANK.get(h[1].get("source_type"), len(RANK))))
     for number, (_, entry) in enumerate(hits[:args.limit], start=1):
-        meta = " | ".join(x for x in (entry.get("capability"), entry.get("published_at")) if x)
-        print(f"{number}. [{entry.get('source_type')}] {entry.get('title')} | {meta}")
-        print(f"   {entry.get('path')}")
-        summary = entry.get("summary", "")
-        if summary:
-            print(f"   {summary[:SUMMARY_CHARS]}")
+        print_hit(number, entry.get("source_type"), entry.get("title"), entry.get("capability"),
+                  entry.get("published_at", ""), entry.get("path"), entry.get("summary", "")[:SUMMARY_CHARS])
     if len(hits) > args.limit:
         print(f"\n{args.limit} of {len(hits)} matches shown; narrow with more terms, "
               "--source, --capability or --since.")
+
+
+def cmd_search(args) -> None:
+    docs = docs_dir(args.docs_dir)
+    connection, reason = open_db(docs)
+    if connection is not None:
+        try:
+            if search_full_text(connection, args):
+                return
+            reason = "search.db could not answer the query"
+        finally:
+            connection.close()
+    print(f"note: full-text search unavailable ({reason}); matching titles, headings, tags and summaries only.",
+          file=sys.stderr)
+    search_titles(docs, args)
 
 
 def read_page(docs: Path, page: str) -> tuple[Path, list[str]]:

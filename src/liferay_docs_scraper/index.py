@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 from .filter_urls import CAPABILITIES, atomic_write_text
 
 SEARCH_INDEX_NAME = "search_index.jsonl"
+SEARCH_DB_NAME = "search.db"
 ANOMALIES_NAME = "anomalies.jsonl"
 
 OFFICIAL_SOURCE_TYPE = "official"
@@ -24,6 +27,17 @@ INDEX_EXTRA_FIELDS = (
     "applicable_versions", "feature", "deployment_approach", "resource_type",
 )
 SUMMARY_CHARS = 200
+# Column order of the full-text table; the first four are indexed, the rest are
+# stored so one query returns everything a search hit shows. The skill's
+# scripts/docs.py reads this table, so keep the two in step.
+SEARCH_DB_SCHEMA = """
+CREATE VIRTUAL TABLE docs USING fts5(
+    title, headings, tags, body,
+    path UNINDEXED, url UNINDEXED, source_type UNINDEXED, capability UNINDEXED,
+    published_at UNINDEXED, summary UNINDEXED, fetched_at UNINDEXED,
+    tokenize = 'porter unicode61'
+)
+"""
 
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 # Official pages open with an underlined title (a blank line may sit between the two).
@@ -191,6 +205,7 @@ def source_dirs(raw_dir: Path) -> list[tuple[str, Path]]:
 
 def build_search_index(raw_dir: Path, reports_dir: Path) -> int:
     entries: list[dict] = []
+    db_rows: list[tuple] = []
     for source_type, directory in source_dirs(raw_dir):
         if not directory.exists():
             continue
@@ -215,12 +230,42 @@ def build_search_index(raw_dir: Path, reports_dir: Path) -> int:
             entry.update({key: frontmatter[key] for key in INDEX_EXTRA_FIELDS if frontmatter.get(key)})
             entry["summary"] = summarize(body, title=title)
             entries.append(entry)
+            db_rows.append((
+                title, " ".join(headings), f"{entry.get('tags', '')} {entry.get('categories', '')}".strip(),
+                MARKDOWN_LINK_RE.sub(r"\1", body),  # link targets are URL noise, not searchable text
+                entry["path"], entry["url"], entry["source_type"], capability,
+                entry.get("published_at", ""), entry["summary"], entry["fetched_at"],
+            ))
 
     entries.sort(key=lambda item: (
         SOURCE_RANK.get(item["source_type"], len(SOURCE_RANK)), item["capability"], item["title"],
     ))
     write_jsonl(reports_dir / SEARCH_INDEX_NAME, entries)
+    # after the JSONL, so the database is never older than the index it accompanies
+    write_search_db(reports_dir / SEARCH_DB_NAME, db_rows)
     return len(entries)
+
+
+def write_search_db(path: Path, rows: list[tuple]) -> bool:
+    """Full-text (SQLite FTS5) index over the page bodies, replaced atomically.
+    False -- with any old database left in place -- when this Python's SQLite
+    has no FTS5; search then falls back to the JSONL index."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    try:
+        connection = sqlite3.connect(tmp)
+        try:
+            connection.execute(SEARCH_DB_SCHEMA)
+            connection.executemany(f"INSERT INTO docs VALUES ({', '.join('?' * 11)})", rows)
+            connection.commit()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        tmp.unlink(missing_ok=True)
+        return False
+    os.replace(tmp, path)
+    return True
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:

@@ -57,6 +57,7 @@ Setup and run (see README.md for the full explanation):
     # one-time: start a self-hosted Firecrawl, and point FIRECRAWL_API_URL at it
     uv run liferay-context-builder             # writes to resolve_docs_dir(), see above
     uv run liferay-context-builder --official-only   # official docs only, ~20-25 min
+    uv run liferay-context-builder --reindex-only    # rebuild the search indexes, no crawling
     uv run liferay-context-builder --max-pages 200 --official-only   # smaller test run
 """
 
@@ -556,7 +557,13 @@ def main() -> None:
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
     parser.add_argument("--official-only", action="store_true",
                         help="Only the official docs (~20-25 min); skip the community KB articles and blog posts.")
+    parser.add_argument("--reindex-only", action="store_true",
+                        help="Rebuild search_index.jsonl and search.db from the Markdown already on disk; no crawling.")
     args = parser.parse_args()
+
+    if args.reindex_only:
+        print(f"Indexed {build_search_index(RAW_DIR, FILTERED_DIR)} pages into {FILTERED_DIR}")
+        return
 
     expected_total = estimate_total_pages()
     size_hint = f"~{expected_total} pages last time" if expected_total else "~20-25 min usually"

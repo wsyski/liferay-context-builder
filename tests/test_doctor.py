@@ -41,3 +41,17 @@ def test_next_steps_point_at_firecrawl(capsys, tmp_path):
     out = capsys.readouterr().out
     assert "crawl4ai" not in out
     assert "FIRECRAWL_API_URL" in out
+
+
+def test_full_text_pages_counts_the_fts_database_and_tolerates_absence(tmp_path):
+    from liferay_docs_scraper import index
+
+    assert doctor.count_full_text_pages(tmp_path / "nope.db") is None
+    (tmp_path / "junk.db").write_text("not a database", encoding="utf-8")
+    assert doctor.count_full_text_pages(tmp_path / "junk.db") is None
+
+    page = tmp_path / "raw" / "search" / "a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text('---\ncapability: search\n---\n# A\n\nBody text.\n', encoding="utf-8")
+    index.build_search_index(tmp_path / "raw", tmp_path / "reports")
+    assert doctor.count_full_text_pages(tmp_path / "reports" / "search.db") == 1

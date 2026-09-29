@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from liferay_docs_scraper import index
 
 
@@ -167,3 +169,71 @@ def test_detect_anomalies_reports_short_error_and_size_change(tmp_path):
 
     kinds = {item["kind"] for item in anomalies}
     assert {"short_body", "error_marker", "missing_title", "body_shrank"} <= kinds
+
+
+def fts_available():
+    import sqlite3
+    try:
+        sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(a)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+needs_fts = pytest.mark.skipif(not fts_available(), reason="this Python's SQLite has no FTS5")
+
+
+def build_small_library(tmp_path):
+    raw_dir = tmp_path / "raw"
+    page = raw_dir / "search" / "tuning.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        '---\nurl: "https://learn.liferay.com/w/dxp/search/tuning"\ncapability: search\n'
+        'fetched_at: "2026-09-01T00:00:00Z"\n---\n# Search Tuning\n\n'
+        "Set [the property](https://learn.liferay.com/hidden-target) company.security.auth.type for logins.\n",
+        encoding="utf-8",
+    )
+    reports_dir = tmp_path / "reports" / "filtered"
+    index.build_search_index(raw_dir, reports_dir)
+    return reports_dir / "search.db"
+
+
+@needs_fts
+def test_build_search_index_writes_a_full_text_db_with_body_text_and_metadata(tmp_path):
+    import sqlite3
+    db = build_small_library(tmp_path)
+
+    connection = sqlite3.connect(db)
+    rows = connection.execute(
+        "SELECT title, path, source_type, capability, url FROM docs WHERE docs MATCH ?",
+        ('"company security auth type"',),
+    ).fetchall()
+
+    assert rows == [("Search Tuning", "raw/search/tuning.md", "official", "search",
+                     "https://learn.liferay.com/w/dxp/search/tuning")]
+    assert connection.execute("SELECT count(*) FROM docs WHERE docs MATCH 'hidden'").fetchone()[0] == 0  # link targets are not indexed
+    assert connection.execute("SELECT count(*) FROM docs WHERE docs MATCH 'property'").fetchone()[0] == 1  # link text is
+    assert connection.execute("SELECT count(*) FROM docs WHERE docs MATCH 'logins OR login'").fetchone()[0] == 1  # porter stemming
+
+
+@needs_fts
+def test_search_db_is_replaced_not_appended_on_rebuild(tmp_path):
+    import sqlite3
+    db = build_small_library(tmp_path)
+    build_small_library(tmp_path)
+
+    assert sqlite3.connect(db).execute("SELECT count(*) FROM docs").fetchone()[0] == 1
+    assert not list(db.parent.glob("*.tmp"))
+
+
+def test_missing_fts5_leaves_the_jsonl_index_and_reports_false(tmp_path, monkeypatch):
+    import sqlite3
+
+    def no_fts(*args, **kwargs):
+        raise sqlite3.OperationalError("no such module: fts5")
+
+    monkeypatch.setattr(index.sqlite3, "connect", no_fts)
+
+    assert index.write_search_db(tmp_path / "search.db", []) is False
+    assert not (tmp_path / "search.db").exists()
+    assert not list(tmp_path.glob("*.tmp"))

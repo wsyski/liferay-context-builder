@@ -57,17 +57,24 @@ official docs older than ~7 days as STALE.
 Use a discover -> read -> answer flow:
 
 1. Pick the likely capability folder(s) from the map below.
-2. Search the index. Every term must match; hits are ranked (title and heading
-   matches first, then official > how-to > troubleshooting > blog, newest
-   first) and capped at 15:
+2. Search. It is full-text over titles, headings, tags **and page bodies**,
+   stemmed (`extensions` matches `extension`) and ranked by relevance, with
+   official docs ahead of how-to/troubleshooting ahead of blog posts on
+   near-equal relevance; capped at 15:
    ```
-   docs.py search "<term>" "<term2>" [--source official|howto|troubleshooting|blog] [--capability <folder>] [--since 2024]
+   docs.py search <term> <term2> [--source official|howto|troubleshooting|blog] [--capability <folder>] [--since 2024]
    ```
-   Each hit shows source, capability, date, `path` (the file to read) and a
-   one-line summary — judge relevance and recency from that before opening
-   anything. Try 2-3 keyword variants; the docs use product terms ("client
-   extension", "object"), not everyday synonyms. The source is
-   `$DOCS_DIR/reports/filtered/search_index.jsonl`.
+   Every term must match. Quote a phrase to match it exactly
+   (`"client extension"`) and pass identifiers whole
+   (`company.security.auth.type`, an exception class, an error string). Each
+   hit shows source, capability, date, `path` (the file to read) and the
+   passage that matched, between « » — judge relevance and recency from that
+   before opening anything. Try 2-3 keyword variants; the docs use product
+   terms ("client extension", "object"), not everyday synonyms. If no page
+   matches every term it says so and shows the closest partial matches.
+   - If stderr says full-text search is unavailable (no `search.db`, or a
+     build is still running), only titles, headings, tags and summaries are
+     searched: grep `$DOCS_DIR/raw/` for text that lives in a page body.
    - **No python3?** `grep -i "<keyword>" $DOCS_DIR/reports/filtered/search_index.jsonl | head -30`
      (cap it: a common term matches hundreds of ~1 KB lines), then
      `| grep community-blog` etc. to narrow by source.

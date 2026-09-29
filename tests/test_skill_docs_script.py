@@ -185,3 +185,157 @@ def test_section_with_unknown_heading_exits_2(capsys, library):
 
     assert exc_info.value.code == 2
     assert "docs.py outline" in capsys.readouterr().err
+
+
+# --- full-text search (search.db built by the package's index builder) ---------------------------
+
+def fts_available():
+    import sqlite3
+    try:
+        sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(a)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+needs_fts = pytest.mark.skipif(not fts_available(), reason="this Python's SQLite has no FTS5")
+
+
+def page_text(title, capability, body, source="official", extra=""):
+    return (f'---\nurl: "https://x/{title.replace(" ", "-")}"\nsource_type: {source}\n'
+            f'capability: {capability}\n{extra}fetched_at: "2026-09-01T00:00:00Z"\n---\n# {title}\n\n{body}\n')
+
+
+@pytest.fixture
+def fts_library(tmp_path):
+    from liferay_docs_scraper import index
+
+    def build(pages):
+        for rel, text in pages.items():
+            page = tmp_path / "raw" / rel
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(text, encoding="utf-8")
+        index.build_search_index(tmp_path / "raw", tmp_path / "reports" / "filtered")
+        return tmp_path
+    return build
+
+
+@needs_fts
+def test_full_text_search_finds_a_term_that_only_appears_in_the_body(capsys, fts_library):
+    root = fts_library({
+        "self-hosted/props.md": page_text("Portal Properties", "self-hosted",
+                                          "Set company.security.auth.type to emailAddress for login."),
+        "search/other.md": page_text("Other", "search", "Nothing relevant here at all."),
+    })
+
+    out = run(capsys, root, "search", "company.security.auth.type")
+
+    assert "raw/self-hosted/props.md" in out
+    assert "«company.security.auth.type»" in out
+    assert "raw/search/other.md" not in out
+
+
+@needs_fts
+def test_full_text_search_stems_and_ranks_title_matches_above_body_matches(capsys, fts_library):
+    root = fts_library({
+        "development/a.md": page_text("Client Extension Basics", "development", "How to build one."),
+        "development/b.md": page_text("Deployment Notes", "development",
+                                      "A long note that mentions extensions once, in passing."),
+    })
+
+    out = run(capsys, root, "search", "extensions")
+
+    assert out.index("development/a.md") < out.index("development/b.md")
+
+
+@needs_fts
+def test_full_text_search_prefers_official_over_blog_on_equal_relevance(capsys, fts_library):
+    root = fts_library({
+        "development/doc.md": page_text("Osgi Modules", "development", "Osgi modules explained."),
+        "community-blog/_uncategorized/post.md": page_text(
+            "Osgi Modules", "uncategorized", "Osgi modules explained.", source="community-blog",
+            extra='published_at: "2025-01-01"\n'),
+    })
+
+    out = run(capsys, root, "search", "osgi")
+
+    assert out.index("[official]") < out.index("[community-blog]")
+
+
+@needs_fts
+def test_full_text_search_filters_by_source_capability_and_since(capsys, fts_library):
+    root = fts_library({
+        "development/doc.md": page_text("Osgi Guide", "development", "About osgi."),
+        "community-blog/_uncategorized/old.md": page_text(
+            "Osgi Old", "uncategorized", "About osgi.", source="community-blog", extra='published_at: "2022-05-01"\n'),
+        "community-blog/_uncategorized/new.md": page_text(
+            "Osgi New", "uncategorized", "About osgi.", source="community-blog", extra='published_at: "2025-05-01"\n'),
+    })
+
+    assert "old.md" not in run(capsys, root, "search", "osgi", "--source", "blog", "--since", "2024")
+    assert "new.md" in run(capsys, root, "search", "osgi", "--source", "blog", "--since", "2024")
+    undated = run(capsys, root, "search", "osgi", "--since", "2024")
+    assert "development/doc.md" in undated
+    only_dev = run(capsys, root, "search", "osgi", "--capability", "development")
+    assert "development/doc.md" in only_dev and "new.md" not in only_dev
+
+
+@needs_fts
+def test_full_text_search_falls_back_to_partial_matches_and_says_so(capsys, fts_library):
+    root = fts_library({"integration/oauth.md": page_text("Using OAuth", "integration", "Request an access token.")})
+
+    out = run(capsys, root, "search", "oauth", "token", "nonexistentword")
+
+    assert "No page matches all the terms" in out
+    assert "integration/oauth.md" in out
+
+
+@needs_fts
+def test_full_text_search_reports_no_hits_and_survives_operator_like_terms(capsys, fts_library):
+    root = fts_library({"search/a.md": page_text("Alpha", "search", "Some text.")})
+
+    assert "No hits for" in run(capsys, root, "search", "zzzz")
+    run(capsys, root, "search", 'AND OR NEAR "quoted" (paren')  # must not raise an FTS syntax error
+
+
+@needs_fts
+def test_full_text_search_caps_output_and_says_how_many_more(capsys, fts_library):
+    root = fts_library({f"search/p{i}.md": page_text(f"Page {i}", "search", "shared keyword text")
+                        for i in range(5)})
+
+    out = run(capsys, root, "search", "keyword", "--limit", "2")
+
+    assert out.count("raw/search/") == 2
+    assert "2 of 5 matches shown" in out
+
+
+@needs_fts
+def test_status_reports_full_text_search_ready(capsys, fts_library):
+    root = fts_library({"search/a.md": page_text("Alpha", "search", "Some text.")})
+
+    assert "full-text search: ready (1 pages)" in run(capsys, root, "status")
+
+
+@needs_fts
+def test_stale_database_falls_back_to_the_index_with_a_note(capsys, fts_library):
+    import os
+    import time
+    root = fts_library({"search/a.md": page_text("Alpha Tuning", "search", "Some text.")})
+    later = time.time() + 100
+    os.utime(root / "raw" / "search", (later, later))  # a page changed after the database was built
+
+    docs.main(["--docs-dir", str(root), "search", "alpha"])
+    captured = capsys.readouterr()
+
+    assert "raw/search/a.md" in captured.out
+    assert "full-text search unavailable" in captured.err and "older than the Markdown" in captured.err
+
+
+def test_missing_database_falls_back_to_the_index_with_a_note(capsys, library):
+    root = library([entry("Alpha", path="raw/search/a.md")])
+
+    docs.main(["--docs-dir", str(root), "search", "alpha"])
+    captured = capsys.readouterr()
+
+    assert "raw/search/a.md" in captured.out
+    assert "no search.db" in captured.err
