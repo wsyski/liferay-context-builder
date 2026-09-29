@@ -35,8 +35,9 @@ It prints the docs dir, the page count per source, fetch dates, and flags
 official docs older than ~7 days as STALE.
 
 - **"No search index" or no official pages?** Tell the user to run the builder
-  once (takes ~20-25 min, hits learn.liferay.com directly, needs a running
-  Firecrawl at `$FIRECRAWL_API_URL`):
+  once (about 1.5 h for everything, ~20-25 min with `--official-only`; hits
+  learn.liferay.com and liferay.dev directly, needs a running Firecrawl at
+  `$FIRECRAWL_API_URL`):
   ```
   docker compose up -d   # in your Firecrawl checkout, one-time per machine session
   uv run liferay-context-builder
@@ -141,10 +142,11 @@ citing rules above). Same folder layout as `raw/`, one source per folder:
 | `raw/community-troubleshooting/{capability}/` | KB troubleshooting entries, ~3,700, titled after the error | an error message or symptom |
 | `raw/community-blog/{capability}/` (`_uncategorized/` when no site category maps; most are) | liferay.dev blog posts from 2022 on, no announcements, with `published_at`, `author`, `tags` | recent features, design rationale, walkthroughs |
 
-They come from optional, separate builder commands
-(`uv run liferay-context-builder-community`, `uv run liferay-context-builder-blogs`);
-this skill works without them. If `docs.py status` shows none, don't ask for
-them unless official docs can't answer.
+`uv run liferay-context-builder` fetches them after the official docs (skip
+with `--official-only`); each also has its own command
+(`liferay-context-builder-community`, `liferay-context-builder-blogs`). This
+skill works without them. If `docs.py status` shows none, don't ask for them
+unless official docs can't answer.
 
 ## Reference files
 

@@ -26,20 +26,17 @@ Python 3.10-3.13 · [MIT license](LICENSE) · fork of
 docker compose up -d
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3002/v0/health/liveness   # -> 200
 
-# 2. Build the official docs library (~20-25 min) into ~/.liferay-docs
+# 2. Build the whole library into ~/.liferay-docs (~1.5 h): official docs, then
+#    community KB articles, then liferay.dev blog posts
 cd /path/to/liferay-context-builder
 uv run liferay-context-builder
+#    official docs only (~20-25 min):
+#    uv run liferay-context-builder --official-only
 
-# 3. Optional: community articles (~1 h)
-uv run liferay-context-builder-community
-
-# 4. Optional: recent community blog posts from liferay.dev (a few minutes)
-uv run liferay-context-builder-blogs
-
-# 5. Check the result
+# 3. Check the result
 uv run liferay-context-builder-doctor
 
-# 6. Stop Firecrawl
+# 4. Stop Firecrawl
 cd /path/to/firecrawl && docker compose stop
 ```
 
@@ -114,6 +111,13 @@ re-run moves posts whose categories changed without refetching them. The site
 returns 403 for deep listing
 pages; that ends discovery early, keeps what was found, and exits 1.
 
+**One command builds everything.** `liferay-context-builder` runs the official
+crawl, then the community KB articles, then the blog posts, and exits 1 if any
+stage reported a failure. A stage that fails does not skip the next one.
+`--official-only` stops after the official docs. The community and blog stages
+also have their own commands (see the Command Reference), and the flags `--max-depth`
+and `--max-pages` apply to the official stage only.
+
 **Failure behaviour**
 
 - Firecrawl unreachable → one-line error naming `FIRECRAWL_API_URL`, exit 1.
@@ -125,10 +129,12 @@ pages; that ends discovery early, keeps what was found, and exits 1.
 ## Command Reference
 
 ```bash
-uv run liferay-context-builder                      # full official-docs build
-uv run liferay-context-builder --max-pages 30       # quick smoke run
-uv run liferay-context-builder --max-depth 12 --max-pages 3000
+uv run liferay-context-builder                      # everything: official docs, community KB articles, blogs
+uv run liferay-context-builder --official-only      # official docs only (~20-25 min)
+uv run liferay-context-builder --official-only --max-pages 30   # quick smoke run
+uv run liferay-context-builder --official-only --max-depth 12 --max-pages 3000
 
+# the two extra stages also run on their own:
 uv run liferay-context-builder-community                              # How-To + Troubleshooting
 uv run liferay-context-builder-community --resource-type howto        # one type
 uv run liferay-context-builder-community --resource-type troubleshooting --limit 100

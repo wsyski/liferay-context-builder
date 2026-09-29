@@ -140,6 +140,65 @@ def test_main_exits_nonzero_on_crawl_error(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "quarantine_orphans", lambda stats: pipeline.QuarantineResult())
     monkeypatch.setattr(pipeline, "write_filtered_reports", lambda stats: None)
     monkeypatch.setattr(pipeline, "print_summary", lambda stats, quarantine_result: None)
+    monkeypatch.setattr("sys.argv", ["liferay-context-builder", "--official-only"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        pipeline.main()
+
+    assert exc_info.value.code == 1
+
+
+def stub_official_stage(monkeypatch, tmp_path, stats=None):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "run_crawl", lambda max_depth, max_pages: stats or pipeline.RunStats())
+    monkeypatch.setattr(pipeline, "quarantine_orphans", lambda stats: pipeline.QuarantineResult())
+    monkeypatch.setattr(pipeline, "write_filtered_reports", lambda stats: None)
+    monkeypatch.setattr(pipeline, "print_summary", lambda stats, quarantine_result: None)
+
+
+def test_main_ingests_community_and_blogs_after_the_official_docs(monkeypatch, tmp_path):
+    stub_official_stage(monkeypatch, tmp_path)
+    order = []
+    monkeypatch.setattr(pipeline.community, "run_all", lambda rt, limit: order.append(("community", rt, limit)) or False)
+    monkeypatch.setattr(pipeline.blogs, "ingest", lambda: order.append("blogs") or False)
+    monkeypatch.setattr("sys.argv", ["liferay-context-builder"])
+
+    pipeline.main()  # no SystemExit: every stage succeeded
+
+    assert order == [("community", None, None), "blogs"]
+
+
+def test_main_official_only_skips_community_and_blogs(monkeypatch, tmp_path):
+    stub_official_stage(monkeypatch, tmp_path)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("stage should have been skipped")
+
+    monkeypatch.setattr(pipeline.community, "run_all", must_not_run)
+    monkeypatch.setattr(pipeline.blogs, "ingest", must_not_run)
+    monkeypatch.setattr("sys.argv", ["liferay-context-builder", "--official-only"])
+
+    pipeline.main()
+
+
+def test_main_still_runs_blogs_and_exits_nonzero_when_community_reports_failure(monkeypatch, tmp_path):
+    stub_official_stage(monkeypatch, tmp_path)
+    ran = []
+    monkeypatch.setattr(pipeline.community, "run_all", lambda rt, limit: True)
+    monkeypatch.setattr(pipeline.blogs, "ingest", lambda: ran.append("blogs") or False)
+    monkeypatch.setattr("sys.argv", ["liferay-context-builder"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        pipeline.main()
+
+    assert exc_info.value.code == 1
+    assert ran == ["blogs"]
+
+
+def test_main_exits_nonzero_when_only_the_official_stage_failed(monkeypatch, tmp_path):
+    stub_official_stage(monkeypatch, tmp_path, pipeline.RunStats(fetch_failed=["u"]))
+    monkeypatch.setattr(pipeline.community, "run_all", lambda rt, limit: False)
+    monkeypatch.setattr(pipeline.blogs, "ingest", lambda: False)
     monkeypatch.setattr("sys.argv", ["liferay-context-builder"])
 
     with pytest.raises(SystemExit) as exc_info:

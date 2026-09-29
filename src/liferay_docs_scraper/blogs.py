@@ -396,6 +396,16 @@ def print_summary(stats: RunStats) -> None:
         print(f"  - {url}")
 
 
+def ingest(since: date = DEFAULT_SINCE, include_news: bool = False, refresh: bool = False,
+           limit: int | None = None) -> bool:
+    """Discover, fetch and write posts, then report. True if anything failed."""
+    ensure_anomalies_report(FILTERED_DIR)
+    stats = run(fetch_page, fetcher.batch_scrape, since, include_news, refresh, limit=limit)
+    write_report(stats)
+    print_summary(stats)
+    return bool(stats.fetch_failed or stats.crawl_errors)
+
+
 def parse_since(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -417,16 +427,13 @@ def main() -> None:
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be greater than zero")
 
-    ensure_anomalies_report(FILTERED_DIR)
     try:
-        stats = run(fetch_page, fetcher.batch_scrape, args.since, args.include_news, args.refresh, limit=args.limit)
+        failed = ingest(args.since, args.include_news, args.refresh, limit=args.limit)
     except fetcher.FirecrawlUnavailable as exc:
         print(f"ERROR: {exc}\n  Set FIRECRAWL_API_URL or start the stack: "
               "cd /path/to/firecrawl && docker compose up -d", file=sys.stderr)
         sys.exit(1)
-    write_report(stats)
-    print_summary(stats)
-    if stats.fetch_failed or stats.crawl_errors:
+    if failed:
         sys.exit(1)
 
 

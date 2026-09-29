@@ -49,10 +49,15 @@ This tool's only job is fetching and saving -- it does not validate fetched
 content quality (see docs/adr/0002-drop-content-validation.md for why, and
 the accepted trade-off).
 
+By default the run then continues with the community KB articles
+(community.py) and the liferay.dev blog posts (blogs.py), so one command builds
+the whole library; --official-only stops after the official docs.
+
 Setup and run (see README.md for the full explanation):
     # one-time: start a self-hosted Firecrawl, and point FIRECRAWL_API_URL at it
     uv run liferay-context-builder             # writes to resolve_docs_dir(), see above
-    uv run liferay-context-builder --max-pages 200   # smaller test run
+    uv run liferay-context-builder --official-only   # official docs only, ~20-25 min
+    uv run liferay-context-builder --max-pages 200 --official-only   # smaller test run
 """
 
 import argparse
@@ -66,7 +71,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import fetcher
+from . import blogs, community, fetcher
 from .classify_pages import analyze_body
 from .classify_pages import classify as classify_navigation
 from .filter_urls import (
@@ -549,6 +554,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
+    parser.add_argument("--official-only", action="store_true",
+                        help="Only the official docs (~20-25 min); skip the community KB articles and blog posts.")
     args = parser.parse_args()
 
     expected_total = estimate_total_pages()
@@ -567,8 +574,18 @@ def main() -> None:
     refresh_still_alive_pages(quarantine_result, stats)
     write_filtered_reports(stats)
     print_summary(stats, quarantine_result)
+    failed = bool(stats.fetch_failed or stats.crawl_errors)
 
-    if stats.fetch_failed or stats.crawl_errors:
+    if not args.official_only:
+        # A failing stage must not cost the next one its run: report and carry on.
+        try:
+            failed |= community.run_all(None, None)
+            failed |= blogs.ingest()
+        except fetcher.FirecrawlUnavailable as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            failed = True
+
+    if failed:
         sys.exit(1)
 
 

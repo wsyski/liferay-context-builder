@@ -417,6 +417,20 @@ def test_main_exits_nonzero_when_run_reports_failure(monkeypatch, tmp_path):
     assert exc_info.value.code == 1
 
 
+def test_ingest_runs_reports_and_returns_whether_anything_failed(monkeypatch, tmp_path):
+    configure_blog_dirs(monkeypatch, tmp_path)
+    written = []
+    monkeypatch.setattr(blogs, "run", lambda *a, **k: blogs.RunStats(fetch_failed=["u"]))
+    monkeypatch.setattr(blogs, "write_report", lambda stats: written.append(stats))
+    monkeypatch.setattr(blogs, "print_summary", lambda stats: None)
+
+    assert blogs.ingest() is True
+    assert len(written) == 1
+
+    monkeypatch.setattr(blogs, "run", lambda *a, **k: blogs.RunStats())
+    assert blogs.ingest() is False
+
+
 def test_main_rejects_non_positive_limit_and_bad_date(monkeypatch):
     for argv in (["--limit", "0"], ["--since", "2022/01/01"]):
         monkeypatch.setattr("sys.argv", ["liferay-context-builder-blogs", *argv])
