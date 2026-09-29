@@ -368,7 +368,13 @@ def quarantine_orphans(stats: RunStats) -> QuarantineResult:
         previous_count = len(on_disk_paths)
         new_count = len(current_slugs)
         if previous_count > 0 and new_count < QUARANTINE_SAFETY_RATIO * previous_count:
+            # Likely an incomplete crawl: don't quarantine, but refresh the
+            # unseen pages directly so they don't silently go stale.
             result.skipped_capabilities.append(capability)
+            for slug in sorted(orphans):
+                url = read_url_from_file(on_disk_paths[slug])
+                if url is not None:
+                    result.direct_refresh_candidates[capability][slug] = url
             continue
 
         if not orphans:
@@ -529,7 +535,7 @@ def print_summary(stats: RunStats, quarantine_result: QuarantineResult) -> None:
 
     if quarantine_result.skipped_capabilities:
         print("\nWARNING: quarantine skipped due to a suspicious count drop "
-              "(possible incomplete crawl), review manually:")
+              "(possible incomplete crawl; unseen pages were refreshed directly instead), review manually:")
         for capability in quarantine_result.skipped_capabilities:
             print(f"  - {capability}")
 

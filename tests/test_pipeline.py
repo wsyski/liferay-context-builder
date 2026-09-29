@@ -88,6 +88,26 @@ def test_quarantine_is_skipped_after_fatal_crawl_error(monkeypatch, tmp_path):
     assert "search" in result.skipped_capabilities
 
 
+def test_quarantine_count_drop_skips_quarantine_but_queues_orphans_for_direct_refresh(monkeypatch, tmp_path):
+    configure_pipeline_dirs(monkeypatch, tmp_path)
+    for name in ("a", "b", "c"):
+        path = tmp_path / "raw" / "cloud" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'---\nurl: "https://learn.liferay.com/w/dxp/cloud/{name}"\n---\n', encoding="utf-8")
+    stats = pipeline.RunStats()
+    stats.outcomes["cloud"].append(pipeline.PageOutcome("https://learn.liferay.com/w/dxp/cloud/a", "cloud", "a", "new"))
+
+    result = pipeline.quarantine_orphans(stats)
+
+    assert "cloud" in result.skipped_capabilities
+    assert result.quarantined["cloud"] == []
+    assert result.direct_refresh_candidates["cloud"] == {
+        "b": "https://learn.liferay.com/w/dxp/cloud/b",
+        "c": "https://learn.liferay.com/w/dxp/cloud/c",
+    }
+    assert (tmp_path / "raw" / "cloud" / "b.md").exists()
+
+
 def test_quarantine_result_flattens_direct_refresh_urls():
     result = pipeline.QuarantineResult()
     result.direct_refresh_candidates["search"]["a"] = "https://learn.liferay.com/w/dxp/search/a"

@@ -56,6 +56,7 @@ def test_crawl_polls_until_completed_and_follows_next(monkeypatch):
                 "next": "http://localhost:3002/v2/crawl/j1?skip=1",
             },
             {"status": "completed", "data": [doc("https://x/b"), doc("https://x/c")], "next": None},
+            {"errors": [], "robotsBlocked": []},
         ]
     )
     monkeypatch.setattr(fetcher, "_request", api)
@@ -65,6 +66,7 @@ def test_crawl_polls_until_completed_and_follows_next(monkeypatch):
     assert urls == ["https://x/a", "https://x/b", "https://x/c"]
     assert api.calls[0] == ("POST", "/v2/crawl", {"url": "https://x/", "limit": 3})
     assert api.calls[3][1] == "http://localhost:3002/v2/crawl/j1?skip=1"
+    assert api.calls[4][1] == "/v2/crawl/j1/errors"
 
 
 def test_crawl_raises_on_failed_job(monkeypatch):
@@ -82,18 +84,109 @@ def test_crawl_raises_on_failed_job(monkeypatch):
         list(fetcher.crawl("https://x/", {}))
 
 
-def test_collect_raises_after_three_consecutive_status_unavailable(monkeypatch):
+def test_crawl_yields_partial_data_before_raising_on_failed_job(monkeypatch):
+    monkeypatch.setattr(
+        fetcher,
+        "_request",
+        FakeApi(
+            [
+                {"success": True, "id": "j1"},
+                {"status": "failed", "error": "boom", "data": [doc("https://x/a")], "next": None},
+            ]
+        ),
+    )
+    seen = []
+
+    with pytest.raises(RuntimeError, match="crawl job j1 ended failed"):
+        for page in fetcher.crawl("https://x/", {}):
+            seen.append(page.url)
+
+    assert seen == ["https://x/a"]
+
+
+def test_crawl_yields_pages_listed_in_errors_endpoint_as_failed(monkeypatch):
+    monkeypatch.setattr(
+        fetcher,
+        "_request",
+        FakeApi(
+            [
+                {"success": True, "id": "j1"},
+                {"status": "completed", "data": [doc("https://x/a")], "next": None},
+                {
+                    "errors": [
+                        {"url": "https://x/timeout", "error": "timed out"},
+                        {"url": "https://x/a", "error": "earlier attempt failed"},
+                        {"url": "https://other.example/ext", "code": "EXTERNAL_LINK"},
+                        {"url": "https://x/ext", "code": "EXTERNAL_LINK"},
+                        {"url": "https://x/timeout", "error": "duplicate"},
+                    ],
+                    "robotsBlocked": ["https://x/robots"],
+                },
+            ]
+        ),
+    )
+
+    pages = {p.url: p.success for p in fetcher.crawl("https://x/", {})}
+
+    assert pages == {"https://x/a": True, "https://x/timeout": False}
+
+
+def test_crawl_survives_unreadable_errors_endpoint(monkeypatch, capsys):
+    monkeypatch.setattr(
+        fetcher,
+        "_request",
+        FakeApi(
+            [
+                {"success": True, "id": "j1"},
+                {"status": "completed", "data": [doc("https://x/a")], "next": None},
+                {"success": False, "httpStatus": 404},
+            ]
+        ),
+    )
+
+    assert [p.url for p in fetcher.crawl("https://x/", {})] == ["https://x/a"]
+    assert "could not read crawl j1 errors" in capsys.readouterr().err
+
+
+def test_collect_raises_after_consecutive_status_unavailable(monkeypatch):
     api = FakeApi(
-        [
-            {"success": True, "id": "j1"},
-            {"success": False, "httpStatus": 500},
-            {"success": False, "httpStatus": 500},
-            {"success": False, "httpStatus": 500},
-        ]
+        [{"success": True, "id": "j1"}]
+        + [{"success": False, "httpStatus": 500}] * fetcher.MAX_MISSING_STATUS_POLLS
     )
     monkeypatch.setattr(fetcher, "_request", api)
     with pytest.raises(RuntimeError, match=r"crawl job j1 status unavailable"):
         list(fetcher.crawl("https://x/", {}))
+
+
+def test_collect_tolerates_a_transient_status_outage(monkeypatch):
+    api = FakeApi(
+        [
+            {"success": True, "id": "j1"},
+            {"success": False, "httpStatus": 502},
+            {"status": "completed", "data": [doc("https://x/a")], "next": None},
+            {"errors": []},
+        ]
+    )
+    monkeypatch.setattr(fetcher, "_request", api)
+
+    assert [p.url for p in fetcher.crawl("https://x/", {})] == ["https://x/a"]
+
+
+def test_request_turns_html_error_body_and_timeout_into_failed_calls(monkeypatch):
+    import io
+    import urllib.error
+
+    def raise_http(*args, **kwargs):
+        raise urllib.error.HTTPError("http://x", 502, "Bad Gateway", {}, io.BytesIO(b"<html>bad gateway</html>"))
+
+    monkeypatch.setattr(fetcher.urllib.request, "urlopen", raise_http)
+    assert fetcher._request("GET", "/v2/crawl/j1") == {"success": False, "httpStatus": 502}
+
+    def raise_timeout(*args, **kwargs):
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(fetcher.urllib.request, "urlopen", raise_timeout)
+    assert fetcher._request("GET", "/v2/crawl/j1") == {"success": False, "httpStatus": 0}
 
 
 def test_collect_raises_when_stalled_past_timeout(monkeypatch):
@@ -164,6 +257,7 @@ def test_crawl_skips_documents_with_no_resolved_url(monkeypatch):
             [
                 {"success": True, "id": "j1"},
                 {"status": "completed", "data": [{"markdown": "body"}], "next": None},
+                {"errors": []},
             ]
         ),
     )
