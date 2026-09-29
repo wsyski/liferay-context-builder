@@ -107,6 +107,46 @@ def test_extract_headings_and_title_drop_markdown_link_syntax():
     assert index.title_from_body(body, "slug") == "Discovering the Authorization Server"
 
 
+def test_underlined_title_counts_as_title_and_heading():
+    body = "[Using Liferay as an MCP Server](https://x/y#z)\n\n=====\n\nIntro.\n\n## Setup\n"
+
+    assert index.extract_headings(body) == ["Using Liferay as an MCP Server", "Setup"]
+    assert index.title_from_body(body, "using-liferay-as-an-mcp-server") == "Using Liferay as an MCP Server"
+    assert index.extract_headings("plain text\nno underline\n") == []
+
+
+def test_page_with_only_an_underlined_title_is_not_flagged_missing_title(tmp_path):
+    body = "Title\n=====\n\nSome real body text that is long enough to avoid the short body check. " * 3
+
+    kinds = [a["kind"] for a in index.detect_anomalies(
+        path=tmp_path / "p.md", url="u", source_type="official", capability="search", body=body)]
+
+    assert "missing_title" not in kinds
+
+
+def test_summarize_prefers_a_complete_sentence_and_skips_the_title_and_emphasis_markers():
+    body = (
+        "Securing Headless API Calls in Liferay DXP\n\n"
+        "APIs (REST or GraphQL)** from the frontend using\n\n"
+        "**Headless APIs** are called from the browser, so they need real authentication.\n"
+    )
+
+    assert index.summarize(body, title="Securing Headless API Calls in Liferay DXP") == \
+        "Headless APIs are called from the browser, so they need real authentication."
+
+
+def test_summarize_skips_a_paragraph_that_starts_mid_sentence():
+    body = ("to external tools and data. Liferay can function as a server for clients.\n\n"
+            "Liferay DXP can act as an MCP server that AI applications connect to.\n")
+
+    assert index.summarize(body) == "Liferay DXP can act as an MCP server that AI applications connect to."
+
+
+def test_summarize_falls_back_to_a_fragment_when_no_sentence_exists():
+    assert index.summarize("a paragraph that never ends with any punctuation at all") == \
+        "a paragraph that never ends with any punctuation at all"
+
+
 def test_summarize_replaces_markdown_links_with_their_text():
     body = "If you have been enjoying the [last years of](https://liferay.dev/twentyfour/2021) talks, join us."
 

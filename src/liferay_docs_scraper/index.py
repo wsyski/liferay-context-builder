@@ -26,6 +26,9 @@ INDEX_EXTRA_FIELDS = (
 SUMMARY_CHARS = 200
 
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# Official pages open with an underlined title (a blank line may sit between the two).
+SETEXT_TITLE_RE = re.compile(r"\A([^\n]+)\n\n?=+[ \t]*(?:\n|\Z)")
+EMPHASIS_RE = re.compile(r"\*\*|__")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
 ANOMALY_ERROR_MARKERS = (
@@ -66,14 +69,13 @@ def parse_frontmatter(markdown: str) -> tuple[dict[str, str], str]:
 
 
 def extract_headings(body: str, limit: int = 12) -> list[str]:
-    headings: list[str] = []
-    for match in HEADING_RE.finditer(body):
-        text = MARKDOWN_LINK_RE.sub(r"\1", match.group(2)).strip()
-        if text:
-            headings.append(text)
-        if len(headings) >= limit:
-            break
-    return headings
+    candidates = []
+    underlined = SETEXT_TITLE_RE.match(body.lstrip())
+    if underlined:
+        candidates.append(underlined.group(1))
+    candidates.extend(match.group(2) for match in HEADING_RE.finditer(body))
+    cleaned = (MARKDOWN_LINK_RE.sub(r"\1", text).strip() for text in candidates)
+    return [text for text in cleaned if text][:limit]
 
 
 def title_from_body(body: str, fallback: str) -> str:
@@ -83,14 +85,23 @@ def title_from_body(body: str, fallback: str) -> str:
     return fallback.replace("-", " ").strip().title() or fallback
 
 
-def summarize(body: str, limit: int = SUMMARY_CHARS) -> str:
-    """First plain prose line of the body, so a grep hit says what the page is about."""
+def summarize(body: str, limit: int = SUMMARY_CHARS, title: str = "") -> str:
+    """First prose paragraph of the body, so a grep hit says what the page is
+    about. Prefers one that starts and ends like a sentence over a broken fragment, and
+    skips a line that just repeats the title."""
+    fragment = ""
     for line in body.splitlines():
-        text = MARKDOWN_LINK_RE.sub(r"\1", line.strip())
-        if len(text) < 40 or text[0] in "#[|>-*=`!" or text.startswith("---"):
+        text = EMPHASIS_RE.sub("", MARKDOWN_LINK_RE.sub(r"\1", line.strip()))
+        if len(text) < 40 or text[0] in "#[|>-*=`!" or text.startswith("---") or text.lower() == title.lower():
             continue
-        return text if len(text) <= limit else text[:limit].rstrip() + "…"
-    return ""
+        if text[-1] in ".!?:" and (text[0].isupper() or text[0].isdigit()):
+            return clip(text, limit)
+        fragment = fragment or text
+    return clip(fragment, limit)
+
+
+def clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 def snapshot(body: str) -> ContentSnapshot:
@@ -191,8 +202,9 @@ def build_search_index(raw_dir: Path, reports_dir: Path) -> int:
 
             capability = frontmatter.get("capability") or directory.name
             headings = extract_headings(body)
+            title = title_from_body(body, path.stem)
             entry = {
-                "title": title_from_body(body, path.stem),
+                "title": title,
                 "url": frontmatter.get("url", ""),
                 "source_type": frontmatter.get("source_type", source_type),
                 "capability": capability,
@@ -201,7 +213,7 @@ def build_search_index(raw_dir: Path, reports_dir: Path) -> int:
                 "fetched_at": frontmatter.get("fetched_at", ""),
             }
             entry.update({key: frontmatter[key] for key in INDEX_EXTRA_FIELDS if frontmatter.get(key)})
-            entry["summary"] = summarize(body)
+            entry["summary"] = summarize(body, title=title)
             entries.append(entry)
 
     entries.sort(key=lambda item: (
