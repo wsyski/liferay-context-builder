@@ -447,20 +447,47 @@ Platform questions it answers from `references/liferay-platform.md`:
 $ uv run liferay-context-builder-doctor
 Docs dir: ~/.liferay-docs
 Official docs: OK (25 markdown files, 30 discovered in last report)
-Community docs: 10 markdown files
+Community docs: 10 markdown files (howto 4, troubleshooting 5, blog 1; newest blog 2026-09-23)
 Official freshness: 2026-09-23 .. 2026-09-23
 Search index: 35 entries
 Full-text index: 35 pages
 Anomalies report: 23 entries
-Claude Code skill: MISSING (/path/to/project/.claude/skills/liferay-expert/SKILL.md)
+Claude Code skill: OK (/home/you/.agents/skills/liferay-expert/SKILL.md)
 
-Next steps:
-  npx skills add wsyski/liferay-context-builder --skill liferay-expert -a claude-code
+Ready: ask Claude Code a Liferay DXP question in this project.
 ```
 
-It reports the active docs directory, official and community file counts, the
-freshness window, index, full-text index and anomaly counts, and whether the skill is
-installed in the project. It never builds or installs anything.
+`liferay-context-builder-doctor` is a read-only health check of the local library and
+the skill. It never fetches, builds or installs anything and needs no Firecrawl, so run
+it any time: after a build, when an agent says the docs are missing, or on a new machine.
+
+```bash
+uv run liferay-context-builder-doctor                              # check ~/.liferay-docs
+LIFERAY_DOCS_DIR=/data/liferay-docs uv run liferay-context-builder-doctor
+uv run liferay-context-builder-doctor --project-dir /path/to/project
+```
+
+The docs directory is `$LIFERAY_DOCS_DIR`, else `~/.liferay-docs`, the same rule the
+builder and the skill use. `--project-dir` (default: the current directory) only sets
+which project's `.claude/skills` is looked at first for the skill.
+
+| Output line | Meaning |
+|---|---|
+| `Docs dir` | The directory being checked. |
+| `Official docs` | Markdown files under `raw/<capability>/`; `MISSING` if there are none. Also shows how many pages the last crawl discovered. |
+| `Community docs` | How-to, troubleshooting and blog files, with a count per source and the newest blog `published_at` (a stale date means the blog stage did not run). Informational; the skill works without them. |
+| `Official freshness` | Oldest and newest `fetched_at` of the official pages; `STALE` when the newest is about 7 days old or more. |
+| `Search index` | Entries in `reports/filtered/search_index.jsonl`. |
+| `Full-text index` | Pages in `search.db`; `MISSING` means `docs.py search` falls back to titles and headings (rebuild with `--reindex-only`). |
+| `Warning: ...` | Printed when the search index or full-text index page count differs from the Markdown files on disk, or `search.db` is older than the Markdown. Fix with `--reindex-only`. Warnings never change the exit code. |
+| `Anomalies report` | Entries in `anomalies.jsonl` (short bodies, missing titles, size jumps). |
+| `Crawl coverage gaps` | Pages the crawl missed and how many the direct refresh recovered, e.g. `596/650`. Shown only when there were gaps. |
+| `Claude Code skill` | Where `liferay-expert/SKILL.md` was found: the project's `.claude/skills`, then `~/.claude/skills`, then `~/.agents/skills`. Otherwise `not installed (optional)`. |
+
+Exit code 0 means the official docs exist (a stale library only prints a warning; a
+missing skill only prints the install command). Exit code 1 means the official docs are
+missing, and the output lists the next steps: start Firecrawl and run
+`uv run liferay-context-builder`.
 
 ## Troubleshooting
 
@@ -568,7 +595,7 @@ Why things are the way they are, with the evidence behind them.
 ## Known limitations and follow-ups
 
 State as of 2026-09-30: 6,929 pages indexed (official 1,661, how-to 1,323,
-troubleshooting 3,595, blogs 350), 139 tests passing, search eval MRR@8 0.961
+troubleshooting 3,595, blogs 350), 146 tests passing, search eval MRR@8 0.961
 (top-1 28/30, top-3 30/30), 8 troubleshooting articles still failing to fetch.
 
 - **Official crawl still loses pages.** The last run found 1,727 pages; the crawl
@@ -609,7 +636,7 @@ troubleshooting 3,595, blogs 350), 139 tests passing, search eval MRR@8 0.961
 - Full-text search (`search.db`) and the `docs.py` script; skill rewritten around it,
   with a Community table and conditional host-local overlay.
 - `evals/search_eval.py`, and ranking weights tuned with it.
-- Doctor reports the full-text index; the test suite now has 139 tests.
+- Doctor reports the full-text index; the test suite now has 146 tests.
 
 ## License
 
