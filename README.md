@@ -441,6 +441,54 @@ Platform questions it answers from `references/liferay-platform.md`:
 >
 > What changed in an API between 7.4 GA3 and the 2026.Q2 release?
 
+## Syncing two machines
+
+Two machines (here `apollo` and the main one) need two things in step: the
+skill and the library. They travel differently.
+
+| What | Where | How it moves |
+|---|---|---|
+| Skill (`SKILL.md`, `scripts/`, `references/`, including the host-local overlay) | `~/.agents/skills/liferay-expert/` | git: commit the overlay `references/liferay-platform-local.md`, push, then `git pull` on apollo |
+| Library (`raw/`, `reports/`) | `~/.liferay-docs` | not in git (~90 MB, generated); `rsync` |
+
+```bash
+# on the machine that last refreshed the library
+rsync -a --delete ~/.liferay-docs/ apollo:~/.liferay-docs/
+
+# on apollo: the skill arrives via git; check the wiring and the library
+git -C ~/.agents pull
+ls -l ~/.claude/skills/liferay-expert     # symlink into ~/.agents/skills/
+python3 ~/.agents/skills/liferay-expert/scripts/docs.py status
+```
+
+Everything in the library is relative (`raw/...` paths in `search.db` and
+`search_index.jsonl`, no absolute paths), so it works from any location and
+needs no rebuild. `search.db` is an SQLite FTS5 file and is portable between
+machines of the same architecture. Refresh on one machine only, then rsync;
+refreshing on both makes the copies drift (fetch dates differ per page).
+
+If the library lives elsewhere on apollo, set `LIFERAY_DOCS_DIR` there (or pass
+`--docs-dir`); nothing in the skill or the library changes.
+
+### When a project or checkout moves
+
+The skill core and the library hold no host paths. Only the host-local overlay
+`references/liferay-platform-local.md` does, so a moved project means editing
+that one file, committing it, and pulling on the other machine.
+
+| What moved | Change |
+|---|---|
+| Portal checkouts (`/opt/liferay/portal/arena-*/portal`, `master`) | the "Portal checkouts" table in the overlay; keep the default-checkout line in step |
+| Sample or tooling projects (`liferay-blade-samples`, `liferay-frontend-projects`) | the "Local sample and tooling projects" table |
+| This repo (`liferay-context-builder`) | the build path in the overlay's "Docs corpus" section; reinstall with `uv sync` in the new location |
+| The library (`~/.liferay-docs`) | set `LIFERAY_DOCS_DIR` on that machine, or update the overlay's `$DOCS_DIR` line if you moved it there permanently |
+| A project vault (`.claude-obsidian.json`) | that file's absolute vault path; it is untracked and per machine |
+
+The overlay is shared through git, so both machines see the same paths. If
+apollo lays its checkouts out differently, do not force one overlay onto both:
+keep the shared overlay generic and add a per-host overlay that the skill reads
+only when it exists.
+
 ## Doctor
 
 ```text
