@@ -80,6 +80,8 @@ Use a discover -> read -> answer flow:
      `| grep community-blog` etc. to narrow by source.
    - **Index missing or thin?** `grep -ril "<keyword>" $DOCS_DIR/raw/<capability>/*.md`.
      Ignore hits under `raw/_navigation/` (TOC-only, no unique content).
+   **User gave a `learn.liferay.com` or `liferay.dev` link?** Skip the search:
+   `docs.py url <url>` prints the local `path` (exit 1 if the page isn't in the library).
 3. Read the best match with the Read tool. Most pages are small; ~1 in 15
    exceeds 20 KB and a few exceed 100 KB (the upgrade breaking-changes pages
    reach 260 KB). Check first with `docs.py outline <path>` (size, headings
@@ -145,8 +147,8 @@ citing rules above). Same folder layout as `raw/`, one source per folder:
 
 | Folder | Covers | Use when |
 |---|---|---|
-| `raw/community-howto/{capability}/` (`_uncategorized/` for untagged) | KB how-to recipes (learn.liferay.com/kb-article), ~1,400 | a "how do I..." the official docs don't answer |
-| `raw/community-troubleshooting/{capability}/` | KB troubleshooting entries, ~3,700, titled after the error | an error message or symptom |
+| `raw/community-howto/{capability}/` (`_uncategorized/` for untagged) | KB how-to recipes (learn.liferay.com/kb-article), ~1,300 | a "how do I..." the official docs don't answer |
+| `raw/community-troubleshooting/{capability}/` | KB troubleshooting entries, ~3,600, titled after the error | an error message or symptom |
 | `raw/community-blog/{capability}/` (`_uncategorized/` when no site category maps; most are) | liferay.dev blog posts from 2022 on, no announcements, with `published_at`, `author`, `tags` | recent features, design rationale, walkthroughs |
 
 `uv run liferay-context-builder` fetches them after the official docs (skip

@@ -7,3 +7,4 @@ reports/filtered/
 dist/
 *.egg-info/
 uv.lock
+.idea/

@@ -75,7 +75,7 @@ flowchart LR
   C --> D[search_index.jsonl + search.db + summary.json + anomalies.jsonl]
   C --> E[liferay-expert skill]
   D --> E
-  E --> F[docs.py: status / search / outline / section]
+  E --> F[docs.py: status / search / url / outline / section]
   F --> G[answers citing source URLs]
 ```
 
@@ -342,6 +342,7 @@ Agents search with the skill's script (standard library only):
 python3 skills/liferay-expert/scripts/docs.py status
 python3 skills/liferay-expert/scripts/docs.py search "client extension" oauth --source blog --since 2024
 python3 skills/liferay-expert/scripts/docs.py search company.security.auth.type
+python3 skills/liferay-expert/scripts/docs.py url https://learn.liferay.com/w/dxp/ai
 python3 skills/liferay-expert/scripts/docs.py outline raw/self-hosted/some-page.md
 python3 skills/liferay-expert/scripts/docs.py section raw/self-hosted/some-page.md "Some heading"
 ```
@@ -519,7 +520,7 @@ uv build
 
 Tests mock the Firecrawl API; no network access is needed. CI runs lint, tests
 and a package build on Python 3.10-3.13. Design decisions are in
-[`docs/adr/`](docs/adr/), and open work is in [`TODO.md`](TODO.md).
+[`docs/adr/`](docs/adr/), and open work is under [Known limitations](#known-limitations-and-follow-ups).
 
 ## Design notes
 
@@ -539,7 +540,7 @@ Why things are the way they are, with the evidence behind them.
   refreshes in one run, 650 in the next (596 recovered, 56 failed). Reading the
   `/errors` endpoint, keeping partial results and refreshing unseen pages of a
   guarded capability address the recovery side. A crawl job cannot be split into
-  chunks, so the cause is not removed (see `TODO.md`).
+  chunks, so the cause is not removed (see [Known limitations](#known-limitations-and-follow-ups)).
 - **SQLite FTS5 instead of embeddings or an external engine.** It ships in the
   standard library, needs nothing installed, gives BM25 ranking, stemming, phrase
   search and passage snippets, and builds in about a second. A plain scan of the
@@ -563,6 +564,37 @@ Why things are the way they are, with the evidence behind them.
 - **The skill in the repo is copyable into a hub.** `SKILL.md` refers to a host-local
   overlay only "if the file exists", so the repo copy and a hub copy differ only by
   that untracked file.
+
+## Known limitations and follow-ups
+
+State as of 2026-09-30: 6,929 pages indexed (official 1,661, how-to 1,323,
+troubleshooting 3,595, blogs 350), 139 tests passing, search eval MRR@8 0.961
+(top-1 28/30, top-3 30/30), 8 troubleshooting articles still failing to fetch.
+
+- **Official crawl still loses pages.** The last run found 1,727 pages; the crawl
+  missed 650, the direct refresh recovered 596, and 56 still failed. A single
+  `/v2/crawl` job cannot be split into 100-URL jobs, so try lowering crawl
+  concurrency or raising Firecrawl's `MAX_CONCURRENT_JOBS` (currently 5) / worker
+  count, and compare `coverage_gap_count` in `reports/filtered/summary.json`.
+  Firecrawl's queue table (`nuq.queue_scrape`, jobs with `stalls = 10`) shows the
+  failures.
+- **Batch chunk size (100) comes from one live test** (291 of 300 articles). Re-check
+  it if failures come back; it is `BATCH_CHUNK_SIZE` in `fetcher.py`.
+- **`Platform` KB tag** (178 articles) is unmapped and stays in `_uncategorized/`. Map
+  it only if you decide which capability it means (`CAPABILITY_TAG_MAP` in
+  `community.py`). About 1,600 troubleshooting articles are uncategorized, so agents
+  should not filter those searches by `--capability`.
+- **Blog capability guesses:** `Frameworks` -> `development` and `Customer Data` ->
+  `personalization` are assumptions (`CATEGORY_CAPABILITY` in `blogs.py`).
+- **Two eval questions rank low:** `company.security.auth.type` (rank 2) and
+  `osgi configuration file` (rank 3). Add more real questions to
+  `evals/search_eval.py` as they come up.
+- **Blog `tags` are a comma-separated string**, so Obsidian does not treat them as
+  tags; only matters if you open `~/.liferay-docs` as a vault.
+- **Refreshing after a failed run:** `uv run liferay-context-builder-community`
+  resumes and fetches only what is missing (~40 min for a full gap), then rebuilds
+  the indexes.
+- **Version:** `pyproject.toml` is still 0.8.0; bump when cutting a release.
 
 ## History of this round of changes
 

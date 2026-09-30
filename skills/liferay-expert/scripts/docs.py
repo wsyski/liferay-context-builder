@@ -4,6 +4,7 @@
   docs.py status                          is the library there, and how fresh?
   docs.py search TERM [TERM...]           ranked full-text hits (page bodies included), with the matching passage
   docs.py outline PATH                    headings of one page, with line numbers
+  docs.py url URL                         the local page for a learn.liferay.com / liferay.dev link
   docs.py section PATH HEADING            just that section of a large page
 
 The library is $LIFERAY_DOCS_DIR, else ~/.liferay-docs. PATH is a `path` value
@@ -21,6 +22,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 INDEX_RELATIVE = Path("reports") / "filtered" / "search_index.jsonl"
 DB_RELATIVE = Path("reports") / "filtered" / "search.db"
@@ -316,6 +318,25 @@ def cmd_section(args) -> None:
               f"Use Read with offset={shown_end + 1} to continue.]")
 
 
+def normalize_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    host = parts.netloc.lower().removeprefix("www.")
+    return f"{host}{parts.path.rstrip('/')}".lower()
+
+
+def cmd_url(args) -> None:
+    wanted = normalize_url(args.url)
+    for entry in load_index(docs_dir(args.docs_dir)):
+        if normalize_url(entry.get("url", "")) == wanted:
+            print_hit(1, entry.get("source_type"), entry.get("title"), entry.get("capability"),
+                      entry.get("published_at", ""), entry.get("path"), entry.get("summary", "")[:SUMMARY_CHARS])
+            return
+    slug = re.sub(r"[-_]+", " ", wanted.rsplit("/", 1)[-1])
+    print(f"Not in the library: {args.url}. It may be new, out of scope or removed; "
+          f"try: docs.py search {slug}", file=sys.stderr)
+    sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--docs-dir", help="Library location (default: $LIFERAY_DOCS_DIR, else ~/.liferay-docs).")
@@ -330,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--since", help="Drop dated pages older than this (YYYY or YYYY-MM-DD); official docs are undated.")
     search.add_argument("--limit", type=int, default=15, help="Maximum hits to print (default 15).")
     search.set_defaults(run=cmd_search)
+
+    url = sub.add_parser("url", help="Find the local page for a learn.liferay.com or liferay.dev URL.")
+    url.add_argument("url")
+    url.set_defaults(run=cmd_url)
 
     outline = sub.add_parser("outline", help="Headings of one page, with line numbers and size.")
     outline.add_argument("path")

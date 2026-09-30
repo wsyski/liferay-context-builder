@@ -339,3 +339,22 @@ def test_missing_database_falls_back_to_the_index_with_a_note(capsys, library):
 
     assert "raw/search/a.md" in captured.out
     assert "no search.db" in captured.err
+
+
+def test_url_finds_local_page_ignoring_scheme_fragment_and_trailing_slash(capsys, library):
+    root = library([entry("Client Extensions", path="raw/development/client-extensions.md",
+                          url="https://learn.liferay.com/w/dxp/development/client-extensions")])
+
+    out = run(capsys, root, "url", "http://www.learn.liferay.com/w/dxp/development/Client-Extensions/?x=1#types")
+
+    assert "raw/development/client-extensions.md" in out
+
+
+def test_url_not_in_library_exits_1_and_suggests_a_search(capsys, library):
+    root = library([entry("Other", url="https://learn.liferay.com/w/dxp/other")])
+
+    with pytest.raises(SystemExit) as exit_info:
+        run(capsys, root, "url", "https://learn.liferay.com/w/dxp/search/synonym-sets")
+
+    assert exit_info.value.code == 1
+    assert "docs.py search synonym sets" in capsys.readouterr().err
