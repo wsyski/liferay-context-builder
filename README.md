@@ -189,8 +189,8 @@ uv run liferay-context-builder-blogs                                  # posts si
 uv run liferay-context-builder-blogs --since 2024-01-01 --limit 20    # smaller test run
 uv run liferay-context-builder-blogs --include-news --refresh         # everything, re-fetch existing
 
-uv run liferay-context-builder-doctor                                 # status of docs + skill
-uv run liferay-context-builder-doctor --project-dir /path/to/project
+uv run liferay-context-builder-doctor                                 # read-only check: docs, per-source counts, index drift, skill
+uv run liferay-context-builder-doctor --project-dir /path/to/project   # look for the skill in this project first
 
 uv run python evals/search_eval.py                                    # score search quality on the real library
 ```
