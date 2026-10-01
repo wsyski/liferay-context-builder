@@ -1,9 +1,16 @@
 name: Unit tests
 
+# The same commands the README's receipts name, so CI and a human run one thing. The suite
+# is seconds, and the diagram check is what catches a card-graph edit that forgot its
+# pictures — both were previously run only when someone remembered. The LLM-gated
+# integration tests are a workflow of their own: integration-test.yml.
 on:
-  pull_request:
   push:
     branches: [main]
+  pull_request:
+  # Actions → "Run workflow" → pick any branch: a refactor branch wants the same suite
+  # before it is merged, and that is exactly when a push trigger cannot help.
+  workflow_dispatch:
 
 jobs:
   test:
